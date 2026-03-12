@@ -1,0 +1,25 @@
+# Hermes Incident Commander — Dependencies
+# ==========================================
+
+# ── Core (required) ─────────────────────────────────────────────────────────
+anthropic>=0.49.0          # Claude API (used in demo + standalone mode)
+pyyaml>=6.0                # Config file parsing
+rich>=13.0                 # Beautiful terminal output in demo
+
+# ── Hermes Agent (required for RL training) ─────────────────────────────────
+# Install via the official installer:
+#   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+# Or manually:
+#   git clone --recurse-submodules https://github.com/NousResearch/hermes-agent.git
+#   cd hermes-agent && uv pip install -e ".[all]"
+
+# ── Atropos (required for RL training) ──────────────────────────────────────
+# pip install atroposlib
+# Or: git clone https://github.com/NousResearch/atropos && pip install -e .
+
+# ── Optional: Weights & Biases logging ──────────────────────────────────────
+# wandb>=0.17
+
+# ── Development / Testing ────────────────────────────────────────────────────
+pytest>=8.0
+pytest-asyncio>=0.23

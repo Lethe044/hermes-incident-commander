@@ -1,0 +1,47 @@
+# Hermes Incident Commander — Atropos Training Config
+# =====================================================
+# Use with:
+#   python environments/incident_env.py serve --config environments/incident_config.yaml
+
+environment:
+  name: incident-commander
+  max_turns: 30
+  terminal_backend: docker          # local | docker | modal | daytona
+  enabled_toolsets: [terminal, file, web, delegate]
+  disabled_toolsets: [browser, vision, image_gen, tts]
+
+training:
+  num_workers: 4                    # Parallel rollout workers
+  batch_size: 16                    # Trajectories per gradient step
+  rollouts_per_eval: 50             # Rollouts between evaluations
+  save_trajectory: true             # Save full tool-call traces
+  export_sharegpt: true             # Export for SFT fine-tuning
+
+model:
+  # For RL training via VLLM (Phase 2)
+  # model_name: NousResearch/Hermes-3-Llama-3.1-8B
+  # server_type: vllm
+
+  # For eval / SFT data gen via OpenRouter (Phase 1)
+  model_name: openrouter/nousresearch/hermes-3-llama-3.1-405b
+  server_type: openai
+  base_url: https://openrouter.ai/api/v1
+
+wandb:
+  project: hermes-incident-commander
+  entity: null                      # Your W&B username/org
+  log_trajectories: true
+
+severity_weights:
+  P0: 3.0
+  P1: 2.0
+  P2: 1.5
+  P3: 1.0
+
+reward_weights:
+  resolution: 0.50
+  rca_quality: 0.15
+  report_quality: 0.15
+  skill_created: 0.10
+  response_speed: 0.05
+  tool_efficiency: 0.05
