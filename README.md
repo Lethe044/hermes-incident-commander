@@ -76,9 +76,9 @@ flowchart TD
     ALERT([🚨 Incident Alert]) --> DETECT
 
     DETECT["🔍 DETECT <br/> Gather system vitals <br/> CPU • Memory • Disk • Services"]
-    TRIAGE["⚖️ TRIAGE\nClassify severity\nP0 · P1 · P2 · P3"]
-    DIAGNOSE["🔬 DIAGNOSE\nRoot cause analysis\nLogs · Processes · Stack traces"]
-    REMEDIATE["🔧 REMEDIATE\nApply safest fix\nTier 1 → 2 → 3"]
+    TRIAGE["⚖️ TRIAGE <br/> Classify severity\nP0 · P1 · P2 · P3"]
+    DIAGNOSE["🔬 DIAGNOSE <br/> Root cause analysis\nLogs · Processes · Stack traces"]
+    REMEDIATE["🔧 REMEDIATE<br/>Apply safest fix<br/>Tier 1 → 2 → 3"]
     VERIFY["✅ VERIFY\nConfirm resolution\nBefore vs after metrics"]
 
     DETECT --> TRIAGE --> DIAGNOSE --> REMEDIATE --> VERIFY
