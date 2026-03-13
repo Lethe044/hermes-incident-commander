@@ -75,7 +75,7 @@ This project was designed to push every capability of Hermes Agent:
 flowchart TD
     ALERT([🚨 Incident Alert]) --> DETECT
 
-    DETECT["🔍 DETECT\nGather system vitals\nCPU · Memory · Disk · Services"]
+    DETECT["🔍 DETECT \n Gather system vitals\nCPU · Memory · Disk · Services"]
     TRIAGE["⚖️ TRIAGE\nClassify severity\nP0 · P1 · P2 · P3"]
     DIAGNOSE["🔬 DIAGNOSE\nRoot cause analysis\nLogs · Processes · Stack traces"]
     REMEDIATE["🔧 REMEDIATE\nApply safest fix\nTier 1 → 2 → 3"]
