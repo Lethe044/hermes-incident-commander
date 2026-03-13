@@ -75,21 +75,21 @@ This project was designed to push every capability of Hermes Agent:
 flowchart TD
     ALERT([🚨 Incident Alert]) --> DETECT
 
-    DETECT["🔍 DETECT <br/> Gather system vitals <br/> CPU • Memory • Disk • Services"]
-    TRIAGE["⚖️ TRIAGE <br/> Classify severity\nP0 · P1 · P2 · P3"]
-    DIAGNOSE["🔬 DIAGNOSE <br/> Root cause analysis\nLogs · Processes · Stack traces"]
+    DETECT["🔍 DETECT<br/>Gather system vitals<br/>CPU • Memory • Disk • Services"]
+    TRIAGE["⚖️ TRIAGE<br/>Classify severity<br/>P0 · P1 · P2 · P3"]
+    DIAGNOSE["🔬 DIAGNOSE<br/>Root cause analysis<br/>Logs · Processes · Stack traces"]
     REMEDIATE["🔧 REMEDIATE<br/>Apply safest fix<br/>Tier 1 → 2 → 3"]
-    VERIFY["✅ VERIFY\nConfirm resolution\nBefore vs after metrics"]
+    VERIFY["✅ VERIFY<br/>Confirm resolution<br/>Before vs after metrics"]
 
     DETECT --> TRIAGE --> DIAGNOSE --> REMEDIATE --> VERIFY
 
-    CRON["⏱️ CRON\nEvery 5 min: health check\nEvery hour: full audit\nDaily 08:00: briefing"]
+    CRON["⏱️ CRON<br/>Every 5 min: health check<br/>Every hour: full audit<br/>Daily 08:00: briefing"]
     CRON -->|triggers| DETECT
 
-    LEARN["🧠 LEARN\nWrite post-incident report\nCreate prevention SKILL.md\nUpdate MEMORY.md\nSearch past incidents (FTS5)"]
+    LEARN["🧠 LEARN<br/>Write post-incident report<br/>Create prevention SKILL.md<br/>Update MEMORY.md<br/>Search past incidents (FTS5)"]
     VERIFY --> LEARN
 
-    GATEWAY["📲 GATEWAY\nTelegram · Discord · Slack"]
+    GATEWAY["📲 GATEWAY<br/>Telegram · Discord · Slack"]
     TRIAGE -->|"🚨 P0/P1 alert"| GATEWAY
     VERIFY -->|"✅ resolved"| GATEWAY
     CRON -->|"📋 daily briefing"| GATEWAY
@@ -120,14 +120,14 @@ graph LR
     ROOT --> DOCS["📁 docs/"]
     ROOT --> REQ["📄 requirements.txt"]
 
-    SKILLS --> SKILL_MD["📄 incident-commander/SKILL.md\n← install into ~/.hermes/skills/"]
+    SKILLS --> SKILL_MD["📄 incident-commander/SKILL.md<br/>← install into ~/.hermes/skills/"]
 
-    ENVS --> ENV_PY["🐍 incident_env.py\n← Atropos RL environment"]
-    ENVS --> ENV_CFG["⚙️ incident_config.yaml\n← training configuration"]
+    ENVS --> ENV_PY["🐍 incident_env.py<br/>← Atropos RL environment"]
+    ENVS --> ENV_CFG["⚙️ incident_config.yaml<br/>← training configuration"]
 
-    DEMO --> DEMO_PY["🐍 demo_incident.py\n← standalone demo"]
+    DEMO --> DEMO_PY["🐍 demo_incident.py<br/>← standalone demo"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py\n← pytest test suite"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py<br/>← pytest test suite"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
