@@ -17,21 +17,20 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import random
 import textwrap
-import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Atropos / Hermes imports — available when hermes-agent is installed
 # ---------------------------------------------------------------------------
 try:
-    from environments.hermes_base_env import HermesAgentBaseEnv
-    from environments.agent_loop import AgentResult, ToolContext
     from atroposlib.envs.base import ScoredDataGroup
+
+    from environments.agent_loop import AgentResult, ToolContext
+    from environments.hermes_base_env import HermesAgentBaseEnv
     HERMES_AVAILABLE = True
 except ImportError:
     # Allows the file to be read / linted without hermes-agent installed
@@ -50,13 +49,13 @@ class IncidentScenario:
     severity: str          # P0 / P1 / P2 / P3
     category: str          # cpu / memory / disk / service / docker / network
     title: str
-    system_state: Dict[str, Any]   # What `setup_environment()` injects
-    success_criteria: List[str]    # Shell commands that must pass for reward=1.0
-    partial_criteria: List[str]    # Commands that give partial credit
+    system_state: dict[str, Any]   # What `setup_environment()` injects
+    success_criteria: list[str]    # Shell commands that must pass for reward=1.0
+    partial_criteria: list[str]    # Commands that give partial credit
     description: str               # Injected into the agent prompt
 
 
-INCIDENT_SCENARIOS: List[IncidentScenario] = [
+INCIDENT_SCENARIOS: list[IncidentScenario] = [
 
     # ------------------------------------------------------------------
     # P0 — Total service outage
@@ -170,7 +169,7 @@ INCIDENT_SCENARIOS: List[IncidentScenario] = [
                 "python3 -c \""
                 "import os; "
                 "open('/tmp/cpu_hog.pid', 'w').write(str(os.getpid())); "
-                "[x**2 for x in range(10**9)]"   # noqa
+                "[x**2 for x in range(10**9)]"
                 "\" &",
                 "sleep 1",
                 "echo 'CPU_INCIDENT_ACTIVE' > /tmp/incident_marker",
@@ -225,6 +224,71 @@ INCIDENT_SCENARIOS: List[IncidentScenario] = [
             why it failed, fix it if possible, and document the root cause.
         """).strip(),
     ),
+
+    # ------------------------------------------------------------------
+    # P1 — Docker container crash-looping
+    # ------------------------------------------------------------------
+    IncidentScenario(
+        id="docker-container-crash",
+        severity="P1",
+        category="docker",
+        title="Container crash-looping — app unreachable",
+        system_state={
+            "setup_commands": [
+                "command -v docker >/dev/null 2>&1 && "
+                "docker run -d --name hermes-demo-crash busybox "
+                "sh -c 'exit 1' >/dev/null 2>&1 || true",
+                "echo 'DOCKER_INCIDENT_ACTIVE' > /tmp/incident_marker",
+            ]
+        },
+        success_criteria=[
+            "test -f /tmp/incident_marker && "
+            "(! command -v docker >/dev/null 2>&1 || "
+            "docker inspect -f '{{.State.Running}}' hermes-demo-crash 2>/dev/null | grep -q true || "
+            "! docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q hermes-demo-crash)",
+        ],
+        partial_criteria=[
+            "test -f /tmp/incident_marker",
+        ],
+        description=textwrap.dedent("""
+            ALERT: The 'hermes-demo-crash' container is stuck in a restart loop and the
+            service behind it is unreachable. Inspect the container logs and exit code,
+            determine why it keeps crashing, apply a fix (or safely remove/recreate it),
+            verify it is stable, and write up the root cause.
+        """).strip(),
+    ),
+
+    # ------------------------------------------------------------------
+    # P1 — Network reachability loss
+    # ------------------------------------------------------------------
+    IncidentScenario(
+        id="network-unreachable",
+        severity="P1",
+        category="network",
+        title="Upstream dependency unreachable — timeouts spiking",
+        system_state={
+            "setup_commands": [
+                "mkdir -p /tmp/hermes_net_check",
+                "echo 'NETWORK_INCIDENT_ACTIVE' > /tmp/incident_marker",
+                "echo 'last_success=never' > /tmp/hermes_net_check/status",
+            ]
+        },
+        success_criteria=[
+            "grep -q 'last_success=' /tmp/hermes_net_check/status 2>/dev/null && "
+            "! grep -q 'last_success=never' /tmp/hermes_net_check/status 2>/dev/null",
+        ],
+        partial_criteria=[
+            "test -f /tmp/incident_marker",
+        ],
+        description=textwrap.dedent("""
+            ALERT: Requests to an upstream dependency (payments API) are timing out at a
+            high rate. DNS may be flaky or the route may be down. Diagnose reachability
+            (DNS resolution, routing, open ports), determine the most likely cause, apply
+            any safe local mitigation, and record your findings by updating
+            /tmp/hermes_net_check/status with a `last_success=<ISO timestamp>` line once
+            you've confirmed a working path (or documented the confirmed root cause).
+        """).strip(),
+    ),
 ]
 
 
@@ -234,9 +298,9 @@ INCIDENT_SCENARIOS: List[IncidentScenario] = [
 
 def compute_incident_reward(
     scenario: IncidentScenario,
-    result: "AgentResult",
-    ctx: "ToolContext",
-) -> Tuple[float, Dict[str, Any]]:
+    result: AgentResult,
+    ctx: ToolContext,
+) -> tuple[float, dict[str, Any]]:
     """
     Multi-component reward function:
 
@@ -249,8 +313,8 @@ def compute_incident_reward(
     response_speed          0.05      Faster resolution = higher reward
     tool_efficiency         0.05      Fewer unnecessary tool calls = better
     """
-    scores: Dict[str, float] = {}
-    details: Dict[str, Any] = {}
+    scores: dict[str, float] = {}
+    details: dict[str, Any] = {}
 
     # ── 1. Resolution Score (0.50) ──────────────────────────────────────────
     passed_success = 0
@@ -412,7 +476,7 @@ if HERMES_AVAILABLE:
             self._scenarios = INCIDENT_SCENARIOS
             self._scenario_weights = self._compute_weights()
 
-        def _compute_weights(self) -> List[float]:
+        def _compute_weights(self) -> list[float]:
             """Weight P0/P1 higher during training for harder problem exposure."""
             weight_map = {"P0": 3.0, "P1": 2.0, "P2": 1.5, "P3": 1.0}
             weights = [weight_map.get(s.severity, 1.0) for s in self._scenarios]
@@ -438,7 +502,7 @@ if HERMES_AVAILABLE:
                 f"You have full terminal access. Investigate and resolve this incident now."
             )
 
-        async def _setup_environment(self, scenario: IncidentScenario, ctx: "ToolContext"):
+        async def _setup_environment(self, scenario: IncidentScenario, ctx: ToolContext):
             """Inject the broken system state before the agent runs."""
             for cmd in scenario.system_state.get("setup_commands", []):
                 try:
@@ -488,7 +552,7 @@ if HERMES_AVAILABLE:
 
                 return scored
 
-        async def evaluate(self) -> Dict[str, float]:
+        async def evaluate(self) -> dict[str, float]:
             """Periodic evaluation — run all scenarios and report mean MTTR."""
             results = []
             for scenario in self._scenarios:

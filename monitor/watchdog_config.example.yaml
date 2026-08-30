@@ -1,0 +1,34 @@
+# Hermes Incident Commander — Watchdog Configuration Example
+# =============================================================
+# Copy this file, edit it, and run:
+#   python -m monitor.watchdog --config monitor/watchdog_config.yaml
+#
+# Anything you don't set falls back to the defaults in monitor/watchdog.py.
+
+cpu_threshold: 90.0          # percent
+mem_threshold: 90.0          # percent
+disk_threshold: 90.0         # percent
+disk_path: "/"                # filesystem to monitor for disk_threshold
+
+poll_interval_seconds: 60     # how often to sample metrics
+consecutive_breaches_required: 3   # avoid alerting on a single noisy spike
+cooldown_minutes: 15          # don't re-fire the same incident type too often
+
+# Services to watch with `systemctl is-failed`. Leave empty to skip.
+watched_services:
+  - nginx
+  - hermes-worker
+
+# Auto-remediation is OFF by default. Even when enabled with --auto-remediate,
+# ONLY the operations below are ever allowed — the model can never run
+# arbitrary shell commands. See SAFETY.md for the full threat model.
+remediation_allowlist:
+  restart_services:
+    - nginx
+  clean_log_dirs:
+    - /var/log/myapp
+  max_log_age_days: 14
+
+auto_remediate: false
+
+model: "claude-sonnet-4-20250514"

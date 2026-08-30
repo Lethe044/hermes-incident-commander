@@ -8,15 +8,10 @@ Run with:
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
-import textwrap
-import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -28,10 +23,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # ---------------------------------------------------------------------------
 from environments.incident_env import (
     INCIDENT_SCENARIOS,
-    IncidentScenario,
     compute_incident_reward,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -95,7 +88,7 @@ class TestScenarioDefinitions:
 
     def test_all_scenarios_have_required_fields(self):
         for s in INCIDENT_SCENARIOS:
-            assert s.id,               f"Scenario missing id"
+            assert s.id,               "Scenario missing id"
             assert s.severity,         f"{s.id}: missing severity"
             assert s.category,         f"{s.id}: missing category"
             assert s.title,            f"{s.id}: missing title"

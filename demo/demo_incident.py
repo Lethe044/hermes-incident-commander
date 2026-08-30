@@ -22,20 +22,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 # ── Rich for pretty terminal output ──────────────────────────────────────────
 try:
     from rich.console import Console
-    from rich.panel import Panel
     from rich.markdown import Markdown
+    from rich.panel import Panel
     from rich.progress import Progress, SpinnerColumn, TextColumn
     from rich.rule import Rule
     from rich.syntax import Syntax
@@ -61,7 +59,7 @@ console = Console() if RICH_AVAILABLE else None
 INCIDENT_DIR = Path.home() / ".hermes" / "incidents"
 SKILLS_DIR   = Path.home() / ".hermes" / "skills"
 
-def _run(cmd: str, timeout: int = 15) -> Dict[str, Any]:
+def _run(cmd: str, timeout: int = 15) -> dict[str, Any]:
     """Run a shell command and return structured output."""
     try:
         result = subprocess.run(
@@ -129,7 +127,7 @@ TOOL_DEFINITIONS = [
 ]
 
 
-def dispatch_tool(tool_name: str, tool_input: Dict[str, Any]) -> str:
+def dispatch_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
     """Route a tool call to its implementation and return a string result."""
     if tool_name == "terminal":
         cmd = tool_input["command"]
@@ -230,6 +228,27 @@ DEMO_SCENARIOS = {
             "verify the fix, and write a post-incident report to ~/.hermes/incidents/."
         ),
     },
+    "network-unreachable": {
+        "title": "🚨 Upstream dependency unreachable — timeouts spiking",
+        "severity": "P1",
+        "setup": [
+            "mkdir -p /tmp/hermes_net_check",
+            "echo 'last_success=never' > /tmp/hermes_net_check/status",
+            "echo 'NETWORK_INCIDENT_ACTIVE=1' > /tmp/hermes_incident_marker",
+        ],
+        "cleanup": [
+            "rm -rf /tmp/hermes_net_check /tmp/hermes_incident_marker",
+        ],
+        "prompt": (
+            "ALERT: Requests to an upstream dependency (payments API) are timing out "
+            "at a high rate. DNS may be flaky or the route may be down. Diagnose "
+            "reachability (try DNS resolution and an HTTP check to a public host like "
+            "1.1.1.1 or 8.8.8.8), determine the most likely cause, and once you've "
+            "confirmed a working path, update /tmp/hermes_net_check/status with a "
+            "`last_success=<ISO timestamp>` line. Write a post-incident report to "
+            "~/.hermes/incidents/."
+        ),
+    },
 }
 
 
@@ -253,18 +272,18 @@ Speed matters — every minute of downtime costs money."""
 
 
 def run_incident_agent(
-    scenario: Dict[str, Any],
+    scenario: dict[str, Any],
     api_key: str,
     max_turns: int = 20,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run the agent loop for one incident scenario."""
 
     client = anthropic.Anthropic(api_key=api_key)
-    messages: List[Dict[str, Any]] = [
+    messages: list[dict[str, Any]] = [
         {"role": "user", "content": scenario["prompt"]}
     ]
     turn = 0
-    tool_calls_made: List[str] = []
+    tool_calls_made: list[str] = []
     start_time = time.time()
 
     if RICH_AVAILABLE:
@@ -444,8 +463,8 @@ def main():
 
     if RICH_AVAILABLE:
         console.print("\n[bold green]✅ Demo complete![/]")
-        console.print(f"Check [cyan]~/.hermes/incidents/[/] for incident reports")
-        console.print(f"Check [cyan]~/.hermes/skills/[/] for auto-created prevention skills")
+        console.print("Check [cyan]~/.hermes/incidents/[/] for incident reports")
+        console.print("Check [cyan]~/.hermes/skills/[/] for auto-created prevention skills")
 
 
 if __name__ == "__main__":

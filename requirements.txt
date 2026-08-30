@@ -5,6 +5,7 @@
 anthropic>=0.49.0          # Claude API (used in demo + standalone mode)
 pyyaml>=6.0                # Config file parsing
 rich>=13.0                 # Beautiful terminal output in demo
+psutil>=5.9                # Real host metrics for the standalone watchdog (monitor/)
 
 # ── Hermes Agent (required for RL training) ─────────────────────────────────
 # Install via the official installer:

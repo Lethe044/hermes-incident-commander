@@ -1,9 +1,34 @@
 # ⚕ Hermes Incident Commander
 
+[![CI](https://github.com/Lethe044/hermes-incident-commander/actions/workflows/ci.yml/badge.svg)](https://github.com/Lethe044/hermes-incident-commander/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 > **An autonomous SRE agent that detects, diagnoses, and heals production infrastructure - then learns from every incident it resolves.**
 
-Built on [Hermes Agent](https://hermes-agent.nousresearch.com) by NousResearch.
-Submitted for the *"Show us what Hermes Agent can do"* challenge.
+Originally built on [Hermes Agent](https://hermes-agent.nousresearch.com) by NousResearch
+for the *"Show us what Hermes Agent can do"* hackathon. Now also ships a **standalone
+watchdog** that runs on any real Linux host with nothing but an Anthropic API key —
+no Hermes installation required.
+
+---
+
+## What's New
+
+- 🛰️ **Standalone Watchdog** — monitor a real host's CPU/memory/disk and failed
+  systemd units, get Claude-powered triage, and (opt-in) safe auto-remediation.
+  No Hermes install needed. See [Standalone Mode](#standalone-mode-no-hermes-required).
+- 📊 **Offline HTML Dashboard** — a single, dependency-free file summarizing your
+  incident history. No server, no CDN, works offline.
+- 📣 **Discord / Slack Notifier** — zero-dependency webhook alerts.
+- 🧩 **2 new incident scenarios** — Docker crash-looping, network unreachability.
+- ✅ **CI on every push** — the test suite and smoke test run automatically via
+  GitHub Actions across Python 3.10–3.12.
+- 🔒 **SAFETY.md** — a written threat model for the difference between demo mode
+  (full shell access, sandbox only) and the watchdog's allow-listed remediation.
+
+Full history in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -49,6 +74,52 @@ python demo/demo_incident.py --scenario cpu-runaway-process
 - Verifies the fix worked
 - Writes a structured post-incident report to `~/.hermes/incidents/`
 - Creates a **new prevention skill** in `~/.hermes/skills/` so it handles this faster next time
+
+> ⚠️ The demo and the RL training environment give the model **full terminal
+> access**. Only run them in a disposable sandbox/VM/container — see
+> [SAFETY.md](SAFETY.md).
+
+---
+
+## Standalone Mode (No Hermes Required)
+
+You don't need a Hermes Agent installation to get real value out of this
+project. `monitor/watchdog.py` runs as an always-on process on any Linux host
+and needs nothing but `ANTHROPIC_API_KEY`:
+
+```bash
+pip install -e .              # or: pip install -r requirements.txt psutil
+
+export ANTHROPIC_API_KEY=sk-ant-...
+# optional, for real-time alerts:
+export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+
+# Single check — good for testing or a cron job
+python -m monitor.watchdog --once
+
+# Continuous monitoring (observe-only by default)
+python -m monitor.watchdog --cpu-threshold 85 --interval 30
+
+# Opt in to SAFE, allow-listed auto-remediation (see monitor/watchdog_config.example.yaml)
+python -m monitor.watchdog --config monitor/watchdog_config.yaml --auto-remediate
+```
+
+Unlike the demo/training environment, the watchdog **never gives the model
+shell access**. It collects real metrics with `psutil`, sends only numbers to
+Claude, and any remediation is restricted to an explicit allow-list you
+configure (restart *this specific* service, clean *this specific* log
+directory). Full threat model in [SAFETY.md](SAFETY.md).
+
+Once you have some incident history, generate a dashboard:
+
+```bash
+python -m monitor.dashboard --open
+```
+
+This writes a single, self-contained HTML file (no server, no external
+requests) summarizing incident counts by severity, auto-remediation rate, and
+a recent-incidents table.
 
 ---
 
@@ -116,27 +187,39 @@ graph LR
     ROOT --> SKILLS["📁 skills/"]
     ROOT --> ENVS["📁 environments/"]
     ROOT --> DEMO["📁 demo/"]
+    ROOT --> MON["📁 monitor/"]
     ROOT --> TESTS["📁 tests/"]
     ROOT --> DOCS["📁 docs/"]
-    ROOT --> REQ["📄 requirements.txt"]
+    ROOT --> CI["📁 .github/workflows/"]
+    ROOT --> REQ["📄 requirements.txt · pyproject.toml"]
 
     SKILLS --> SKILL_MD["📄 incident-commander/SKILL.md<br/>← install into ~/.hermes/skills/"]
 
-    ENVS --> ENV_PY["🐍 incident_env.py<br/>← Atropos RL environment"]
+    ENVS --> ENV_PY["🐍 incident_env.py<br/>← Atropos RL environment, 7 scenarios"]
     ENVS --> ENV_CFG["⚙️ incident_config.yaml<br/>← training configuration"]
 
-    DEMO --> DEMO_PY["🐍 demo_incident.py<br/>← standalone demo"]
+    DEMO --> DEMO_PY["🐍 demo_incident.py<br/>← standalone sandboxed demo"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py<br/>← pytest test suite"]
+    MON --> WATCHDOG["🐍 watchdog.py<br/>← real-host monitor, no Hermes needed"]
+    MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack webhooks"]
+    MON --> DASH["🐍 dashboard.py<br/>← offline HTML dashboard"]
+
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 46 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
+
+    CI --> CIWORKFLOW["⚙️ ci.yml<br/>← tests + smoke test on every push"]
 
     style ROOT fill:#1e3a5f,color:#fff
     style SKILL_MD fill:#1a4731,color:#fff
     style ENV_PY fill:#3d2068,color:#fff
     style DEMO_PY fill:#7b2d00,color:#fff
     style TEST_PY fill:#2d2d2d,color:#fff
+    style WATCHDOG fill:#1a4731,color:#fff
+    style NOTIFY fill:#1a4731,color:#fff
+    style DASH fill:#1a4731,color:#fff
+    style CIWORKFLOW fill:#2d2d2d,color:#fff
 ```
 
 ---
@@ -216,6 +299,8 @@ pie title Reward Components
 | `svc-crash-nginx` | P0 | service | nginx crashed, website unreachable |
 | `disk-full-logs` | P1 | disk | 95% disk usage from exploded log files |
 | `memory-leak-process` | P1 | memory | Mystery process eating 150MB+ |
+| `docker-container-crash` | P1 | docker | Container stuck in a restart/crash loop |
+| `network-unreachable` | P1 | network | Upstream dependency unreachable, timeouts spiking |
 | `cpu-runaway-process` | P2 | cpu | 95% CPU from runaway computation |
 | `failed-systemd-unit` | P2 | service | Custom worker service in failed state |
 
@@ -225,20 +310,28 @@ pie title Reward Components
 
 ```bash
 # Install test dependencies
-pip install pytest pytest-asyncio
+pip install pytest pytest-asyncio psutil
 
-# Run full test suite
+# Fast sanity check, no dependencies beyond the stdlib + pyyaml
+python environments/incident_env.py --smoke-test
+
+# Run full test suite (46 tests: scenarios, reward function, skill file,
+# demo script, notifier, watchdog, dashboard)
 pytest tests/ -v
 
 # Run specific test classes
 pytest tests/test_incident_env.py::TestScenarioDefinitions -v
 pytest tests/test_incident_env.py::TestRewardFunction -v
-pytest tests/test_incident_env.py::TestSkillFile -v
+pytest tests/test_monitor.py::TestSafeRemediation -v
 ```
+
+CI runs both of the above automatically on every push and PR across Python
+3.10, 3.11, and 3.12 — see the badge at the top of this README or
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
 
-## Why This Wins
+## Why This Project Is Worth Using
 
 1. **Real problem, real impact.** P0 incidents cost companies thousands of dollars per minute. Shaving 30 minutes off MTTR with an autonomous agent is immediately valuable.
 
@@ -248,13 +341,27 @@ pytest tests/test_incident_env.py::TestSkillFile -v
 
 4. **Closes the training loop.** The Atropos RL environment means this isn't just a demo - it's a path to training models that are genuinely better at agentic SRE tasks.
 
-5. **Ships with working code.** The demo runs standalone, the tests pass, and the skill file installs in one command.
+5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all — just `ANTHROPIC_API_KEY` — and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
+
+6. **Ships with working code and CI.** The demo runs standalone, 46 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 
+## Contributing
+
+New incident scenarios, notifier integrations, and dashboard improvements are
+welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and
+what a good PR looks like.
+
+## Safety
+
+Please read [SAFETY.md](SAFETY.md) before pointing anything in this repo at
+a machine you care about — demo mode and the watchdog have very different
+risk profiles.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
 
 ---
 

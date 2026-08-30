@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-incident-commander"
+version = "2.0.0"
+description = "Autonomous SRE agent that detects, diagnoses, heals, and learns from production incidents — with a standalone real-host watchdog that needs no Hermes install, just an Anthropic API key."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Lethe044" }]
+keywords = [
+  "sre", "devops", "incident-response", "autonomous-agents",
+  "observability", "self-healing", "mttr", "claude", "anthropic",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Monitoring",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = [
+  "anthropic>=0.49.0",
+  "pyyaml>=6.0",
+  "rich>=13.0",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/Lethe044/hermes-incident-commander"
+Issues = "https://github.com/Lethe044/hermes-incident-commander/issues"
+Changelog = "https://github.com/Lethe044/hermes-incident-commander/blob/main/CHANGELOG.md"
+
+[project.scripts]
+hermes-ic-demo = "demo.demo_incident:main"
+hermes-ic-watchdog = "monitor.watchdog:main"
+hermes-ic-dashboard = "monitor.dashboard:main"
+hermes-ic-notify-test = "monitor.notifier:test_notify"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["demo*", "monitor*", "environments*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Hermes runtime data (never commit real incident history or secrets)
+.hermes/
+*.env
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

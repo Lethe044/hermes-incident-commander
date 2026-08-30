@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""
+Hermes Incident Commander — Standalone Watchdog
+==================================================
+Continuously monitors REAL host metrics (CPU, memory, disk, failed systemd
+units) and, when a threshold is breached for several consecutive checks,
+asks Claude to triage and diagnose the situation, writes a structured
+incident report, sends a Discord/Slack alert, and — only if you explicitly
+opt in — performs SAFE, allow-listed auto-remediation (restart a whitelisted
+service, clean a whitelisted log directory). It never lets the model run
+arbitrary shell commands on your machine.
+
+This module does NOT require a Hermes Agent installation — only
+`pip install psutil anthropic pyyaml` and an ANTHROPIC_API_KEY. This makes
+Incident Commander usable as a real always-on tool, not just a hackathon demo.
+
+Usage:
+    export ANTHROPIC_API_KEY=sk-ant-...
+    python -m monitor.watchdog                       # observe-only, safe default
+    python -m monitor.watchdog --once                 # single check, good for cron/CI
+    python -m monitor.watchdog --auto-remediate        # opt in to safe auto-fixes
+    python -m monitor.watchdog --config monitor/watchdog_config.yaml
+
+See SAFETY.md for the full threat model of --auto-remediate.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from monitor.notifier import Notifier
+
+INCIDENT_DIR = Path.home() / ".hermes" / "incidents"
+HISTORY_LOG = INCIDENT_DIR / "history.jsonl"
+
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+@dataclass
+class WatchdogConfig:
+    cpu_threshold: float = 90.0
+    mem_threshold: float = 90.0
+    disk_threshold: float = 90.0
+    disk_path: str = "/"
+    poll_interval_seconds: int = 60
+    consecutive_breaches_required: int = 3
+    cooldown_minutes: int = 15
+    watched_services: list[str] = field(default_factory=list)
+    remediation_allowlist: dict[str, Any] = field(default_factory=lambda: {
+        "restart_services": [],   # subset of watched_services allowed to be restarted
+        "clean_log_dirs": [],     # dirs where old/large files may be deleted
+        "max_log_age_days": 14,
+    })
+    auto_remediate: bool = False
+    model: str = DEFAULT_MODEL
+
+    @classmethod
+    def from_file(cls, path: str) -> WatchdogConfig:
+        if not YAML_AVAILABLE:
+            raise RuntimeError("pyyaml is required to load a config file (`pip install pyyaml`)")
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+        cfg = cls()
+        for k, v in raw.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+        return cfg
+
+
+# ---------------------------------------------------------------------------
+# Metric collection (real, read-only — no shell exec required)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Metrics:
+    timestamp: str
+    cpu_percent: float
+    mem_percent: float
+    disk_percent: float
+    failed_services: list[str]
+
+    def breaches(self, cfg: WatchdogConfig) -> dict[str, bool]:
+        return {
+            "cpu": self.cpu_percent >= cfg.cpu_threshold,
+            "mem": self.mem_percent >= cfg.mem_threshold,
+            "disk": self.disk_percent >= cfg.disk_threshold,
+            "service": bool(self.failed_services),
+        }
+
+
+def collect_metrics(cfg: WatchdogConfig) -> Metrics:
+    if not PSUTIL_AVAILABLE:
+        raise RuntimeError("psutil is required for the watchdog (`pip install psutil`)")
+
+    cpu = psutil.cpu_percent(interval=1)
+    mem = psutil.virtual_memory().percent
+    disk = psutil.disk_usage(cfg.disk_path).percent
+
+    failed: list[str] = []
+    if cfg.watched_services:
+        for svc in cfg.watched_services:
+            try:
+                result = subprocess.run(
+                    ["systemctl", "is-failed", svc],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.stdout.strip() == "failed":
+                    failed.append(svc)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass  # systemd not available (e.g. macOS, containers) — skip gracefully
+
+    return Metrics(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        cpu_percent=cpu,
+        mem_percent=mem,
+        disk_percent=disk,
+        failed_services=failed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Claude-based triage (analysis only — no tool use, no shell access for the model)
+# ---------------------------------------------------------------------------
+
+TRIAGE_SYSTEM_PROMPT = """You are Hermes Incident Commander, an SRE assistant performing
+remote triage from a metrics snapshot. You do NOT have direct shell access — you only see
+the numbers provided. Respond with ONLY a JSON object (no markdown fences, no prose)
+with exactly these keys:
+
+{
+  "severity": "P0" | "P1" | "P2" | "P3",
+  "category": "cpu" | "memory" | "disk" | "service" | "network" | "docker",
+  "root_cause_hypothesis": "<one or two sentences>",
+  "recommended_actions": ["<short imperative action>", "..."],
+  "report_markdown": "<a full post-incident report in markdown, following the standard
+      Hermes Incident Commander template: Date, Severity, Duration, Impact, Timeline,
+      Root Cause, Remediation Steps, Prevention, Metrics>"
+}"""
+
+
+def triage_with_claude(metrics: Metrics, breaches: dict[str, bool], cfg: WatchdogConfig) -> dict[str, Any]:
+    if not ANTHROPIC_AVAILABLE:
+        raise RuntimeError("anthropic SDK is required (`pip install anthropic`)")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set ANTHROPIC_API_KEY to use Claude-based triage")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    breached = [k for k, v in breaches.items() if v]
+
+    user_prompt = (
+        f"Metrics snapshot at {metrics.timestamp}:\n"
+        f"- CPU usage: {metrics.cpu_percent:.1f}% (threshold {cfg.cpu_threshold:.0f}%)\n"
+        f"- Memory usage: {metrics.mem_percent:.1f}% (threshold {cfg.mem_threshold:.0f}%)\n"
+        f"- Disk usage ({cfg.disk_path}): {metrics.disk_percent:.1f}% (threshold {cfg.disk_threshold:.0f}%)\n"
+        f"- Failed systemd services: {metrics.failed_services or 'none'}\n"
+        f"- Breached thresholds (sustained for {cfg.consecutive_breaches_required} consecutive "
+        f"checks): {breached}\n\n"
+        f"Recommended actions may only reference these allow-listed operations — do not "
+        f"invent others: restart one of {cfg.remediation_allowlist.get('restart_services', [])}, "
+        f"or clean old files in one of {cfg.remediation_allowlist.get('clean_log_dirs', [])}.\n"
+        f"Produce the JSON object now."
+    )
+
+    response = client.messages.create(
+        model=cfg.model,
+        max_tokens=1500,
+        system=TRIAGE_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    text = "".join(b.text for b in response.content if b.type == "text").strip()
+    for fence in ("```json", "```"):
+        text = text.removeprefix(fence)
+    text = text.removesuffix("```")
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Fall back to a minimal structured result rather than crashing the loop
+        return {
+            "severity": "P2",
+            "category": "unknown",
+            "root_cause_hypothesis": "Model response was not valid JSON; see raw_response.",
+            "recommended_actions": [],
+            "report_markdown": f"# Incident Report (fallback)\n\nRaw model response:\n\n{text}",
+            "raw_response": text,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Safe, allow-listed remediation — NEVER arbitrary shell execution
+# ---------------------------------------------------------------------------
+
+def safe_remediate(diagnosis: dict[str, Any], cfg: WatchdogConfig) -> list[str]:
+    """Execute only actions that match the allow-list. Returns a list of
+    human-readable descriptions of what was actually done."""
+    performed: list[str] = []
+    if not cfg.auto_remediate:
+        return performed
+
+    actions = diagnosis.get("recommended_actions", [])
+    restart_allowed = set(cfg.remediation_allowlist.get("restart_services", []))
+    clean_allowed = cfg.remediation_allowlist.get("clean_log_dirs", [])
+    max_age_days = cfg.remediation_allowlist.get("max_log_age_days", 14)
+
+    for action in actions:
+        action_lower = action.lower()
+
+        for svc in restart_allowed:
+            if svc.lower() in action_lower and "restart" in action_lower:
+                try:
+                    subprocess.run(["systemctl", "restart", svc], timeout=15, check=False)
+                    performed.append(f"Restarted allow-listed service: {svc}")
+                except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                    performed.append(f"Failed to restart {svc}: {exc}")
+
+        for log_dir in clean_allowed:
+            if log_dir in action or "clean" in action_lower or "log" in action_lower:
+                removed = _clean_old_files(log_dir, max_age_days)
+                if removed:
+                    performed.append(
+                        f"Removed {removed} file(s) older than {max_age_days}d from {log_dir}"
+                    )
+
+    return performed
+
+
+def _clean_old_files(directory: str, max_age_days: int) -> int:
+    path = Path(directory)
+    if not path.exists() or not path.is_dir():
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    for f in path.glob("*.log*"):
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+
+def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_actions: list[str]) -> Path:
+    INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    category = diagnosis.get("category", "unknown")
+    slug = f"{ts}-{category}"
+    report_path = INCIDENT_DIR / f"{slug}.md"
+
+    body = diagnosis.get("report_markdown", "").strip()
+    if performed_actions:
+        body += "\n\n## Auto-Remediation Performed\n" + "\n".join(f"- {a}" for a in performed_actions)
+    else:
+        body += "\n\n## Auto-Remediation Performed\nNone (observe-only mode, or nothing matched the allow-list)."
+
+    report_path.write_text(body + "\n")
+
+    # Structured JSONL record — consumed by monitor/dashboard.py
+    with open(HISTORY_LOG, "a") as f:
+        f.write(json.dumps({
+            "timestamp": metrics.timestamp,
+            "severity": diagnosis.get("severity", "P3"),
+            "category": category,
+            "cpu_percent": metrics.cpu_percent,
+            "mem_percent": metrics.mem_percent,
+            "disk_percent": metrics.disk_percent,
+            "root_cause": diagnosis.get("root_cause_hypothesis", ""),
+            "auto_remediated": bool(performed_actions),
+            "actions": performed_actions,
+            "report_file": str(report_path.name),
+        }) + "\n")
+
+    return report_path
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False) -> Path | None:
+    """Run a single check. Returns the incident report path if one was triggered."""
+    metrics = collect_metrics(cfg)
+    breaches = metrics.breaches(cfg)
+    breached_any = any(breaches.values())
+
+    if not quiet:
+        print(
+            f"[{metrics.timestamp}] cpu={metrics.cpu_percent:.1f}% "
+            f"mem={metrics.mem_percent:.1f}% disk={metrics.disk_percent:.1f}% "
+            f"failed_services={metrics.failed_services or 'none'} "
+            f"breach={breached_any}"
+        )
+
+    if not breached_any:
+        return None
+
+    diagnosis = triage_with_claude(metrics, breaches, cfg)
+    severity = diagnosis.get("severity", "P2")
+
+    performed = safe_remediate(diagnosis, cfg)
+    report_path = write_incident(metrics, diagnosis, performed)
+
+    if notifier.configured:
+        notifier.send_alert(
+            severity=severity,
+            title_text=diagnosis.get("category", "incident"),
+            detail=(
+                f"{diagnosis.get('root_cause_hypothesis', 'See report for details.')}\n"
+                f"Report: {report_path}"
+                + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
+            ),
+        )
+
+    return report_path
+
+
+def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int | None = None) -> None:
+    consecutive: dict[str, int] = {"cpu": 0, "mem": 0, "disk": 0, "service": 0}
+    last_incident_at: dict[str, float] = {}
+    iterations = 0
+
+    print("Hermes Watchdog started. Observe-only" if not cfg.auto_remediate else
+          "Hermes Watchdog started. Auto-remediation ENABLED (allow-listed actions only)")
+
+    while True:
+        metrics = collect_metrics(cfg)
+        breaches = metrics.breaches(cfg)
+
+        print(
+            f"[{metrics.timestamp}] cpu={metrics.cpu_percent:.1f}% "
+            f"mem={metrics.mem_percent:.1f}% disk={metrics.disk_percent:.1f}% "
+            f"failed_services={metrics.failed_services or 'none'}"
+        )
+
+        fire = False
+        for key, is_breached in breaches.items():
+            if is_breached:
+                consecutive[key] += 1
+            else:
+                consecutive[key] = 0
+
+            if consecutive[key] >= cfg.consecutive_breaches_required:
+                now = time.time()
+                cooled_down = now - last_incident_at.get(key, 0) > cfg.cooldown_minutes * 60
+                if cooled_down:
+                    fire = True
+                    last_incident_at[key] = now
+                    consecutive[key] = 0
+
+        if fire:
+            diagnosis = triage_with_claude(metrics, breaches, cfg)
+            performed = safe_remediate(diagnosis, cfg)
+            report_path = write_incident(metrics, diagnosis, performed)
+            print(f"  -> Incident written: {report_path}")
+
+            if notifier.configured:
+                notifier.send_alert(
+                    severity=diagnosis.get("severity", "P2"),
+                    title_text=diagnosis.get("category", "incident"),
+                    detail=(
+                        f"{diagnosis.get('root_cause_hypothesis', '')}\nReport: {report_path}"
+                        + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
+                    ),
+                )
+
+        iterations += 1
+        if max_iterations is not None and iterations >= max_iterations:
+            break
+        time.sleep(cfg.poll_interval_seconds)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Hermes Incident Commander — Standalone Watchdog")
+    parser.add_argument("--config", help="Path to a YAML config file")
+    parser.add_argument("--once", action="store_true", help="Run a single check and exit (good for cron)")
+    parser.add_argument("--auto-remediate", action="store_true", help="Opt in to safe, allow-listed auto-fixes")
+    parser.add_argument("--cpu-threshold", type=float, default=None)
+    parser.add_argument("--mem-threshold", type=float, default=None)
+    parser.add_argument("--disk-threshold", type=float, default=None)
+    parser.add_argument("--disk-path", type=str, default=None)
+    parser.add_argument("--interval", type=int, default=None, help="Poll interval in seconds")
+    parser.add_argument("--no-notify", action="store_true", help="Disable Discord/Slack notifications")
+    args = parser.parse_args()
+
+    cfg = WatchdogConfig.from_file(args.config) if args.config else WatchdogConfig()
+    if args.auto_remediate:
+        cfg.auto_remediate = True
+    if args.cpu_threshold is not None:
+        cfg.cpu_threshold = args.cpu_threshold
+    if args.mem_threshold is not None:
+        cfg.mem_threshold = args.mem_threshold
+    if args.disk_threshold is not None:
+        cfg.disk_threshold = args.disk_threshold
+    if args.disk_path is not None:
+        cfg.disk_path = args.disk_path
+    if args.interval is not None:
+        cfg.poll_interval_seconds = args.interval
+
+    notifier = Notifier() if not args.no_notify else Notifier(discord_webhook_url="", slack_webhook_url="")
+
+    if not PSUTIL_AVAILABLE:
+        print("Error: psutil is required. Install with: pip install psutil", file=sys.stderr)
+        sys.exit(1)
+
+    if args.once:
+        report = run_once(cfg, notifier)
+        print(f"Incident triggered: {report}" if report else "No breach detected — all clear.")
+    else:
+        try:
+            watch_forever(cfg, notifier)
+        except KeyboardInterrupt:
+            print("\nWatchdog stopped.")
+
+
+if __name__ == "__main__":
+    main()
