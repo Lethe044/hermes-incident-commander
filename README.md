@@ -9,26 +9,32 @@
 
 Originally built on [Hermes Agent](https://hermes-agent.nousresearch.com) by NousResearch
 for the *"Show us what Hermes Agent can do"* hackathon. Now also ships a **standalone
-watchdog** that runs on any real Linux host with nothing but an Anthropic API key —
+watchdog** that runs on any real Linux host with nothing but an Anthropic API key -
 no Hermes installation required.
 
 ---
 
 ## What's New
 
-- 📟 **PagerDuty integration** - the notifier can now trigger (and resolve)
+- 🧪 **`--dry-run` mode** - preview exactly what `--auto-remediate` would
+  restart or delete, without touching anything. See [Standalone Mode](#standalone-mode-no-hermes-required).
+- 📈 **Prometheus `/metrics` endpoint** - optional, stdlib-only exporter for
+  plugging the watchdog into an existing observability stack.
+- 🔁 **PagerDuty resolve wiring** - the watchdog now closes PagerDuty
+  incidents automatically once a breach recovers, instead of leaving them open.
+- 📟 **PagerDuty integration** - the notifier can trigger (and resolve)
   PagerDuty incidents via the Events API v2, alongside Discord/Slack, with
-  zero new dependencies. See [Standalone Mode](#standalone-mode-no-hermes-required).
+  zero new dependencies.
 - ☸️ **Kubernetes pod crash-loop scenario** - an 8th incident scenario
   (`k8s-pod-crashloop`), in both the RL environment and the demo.
-- 🛰️ **Standalone Watchdog** — monitor a real host's CPU/memory/disk and failed
+- 🛰️ **Standalone Watchdog** - monitor a real host's CPU/memory/disk and failed
   systemd units, get Claude-powered triage, and (opt-in) safe auto-remediation.
   No Hermes install needed.
-- 📊 **Offline HTML Dashboard** — a single, dependency-free file summarizing your
+- 📊 **Offline HTML Dashboard** - a single, dependency-free file summarizing your
   incident history. No server, no CDN, works offline. [See a screenshot.](#standalone-mode-no-hermes-required)
-- ✅ **CI on every push** — the test suite and smoke test run automatically via
-  GitHub Actions across Python 3.10–3.12.
-- 🔒 **SAFETY.md** — a written threat model for the difference between demo mode
+- ✅ **CI on every push** - the test suite and smoke test run automatically via
+  GitHub Actions across Python 3.10-3.12.
+- 🔒 **SAFETY.md** - a written threat model for the difference between demo mode
   (full shell access, sandbox only) and the watchdog's allow-listed remediation.
 - 🗺️ **ROADMAP.md** - a living backlog for where this project goes next.
 
@@ -87,7 +93,7 @@ python demo/demo_incident.py --scenario cpu-runaway-process
 shapes, not a captured live session (turn count, timings, and exact tool calls will vary run to run).</sub></p>
 
 > ⚠️ The demo and the RL training environment give the model **full terminal
-> access**. Only run them in a disposable sandbox/VM/container — see
+> access**. Only run them in a disposable sandbox/VM/container - see
 > [SAFETY.md](SAFETY.md).
 
 ---
@@ -102,30 +108,42 @@ and needs nothing but `ANTHROPIC_API_KEY`:
 pip install -e .              # or: pip install -r requirements.txt psutil
 
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional, for real-time alerts (any subset — all three can be set at once):
+# optional, for real-time alerts (any subset - all three can be set at once):
 export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 export PAGERDUTY_ROUTING_KEY=...
 
-# Single check — good for testing or a cron job
+# Single check - good for testing or a cron job
 python -m monitor.watchdog --once
+
+# Preview what --auto-remediate would do, without doing it
+python -m monitor.watchdog --dry-run
 
 # Continuous monitoring (observe-only by default)
 python -m monitor.watchdog --cpu-threshold 85 --interval 30
 
 # Opt in to SAFE, allow-listed auto-remediation (see monitor/watchdog_config.example.yaml)
 python -m monitor.watchdog --config monitor/watchdog_config.yaml --auto-remediate
+
+# Also serve Prometheus-format metrics at http://127.0.0.1:9877/metrics
+python -m monitor.watchdog --metrics-port 9877
 ```
 
 Unlike the demo/training environment, the watchdog **never gives the model
 shell access**. It collects real metrics with `psutil`, sends only numbers to
 Claude, and any remediation is restricted to an explicit allow-list you
 configure (restart *this specific* service, clean *this specific* log
-directory). Full threat model in [SAFETY.md](SAFETY.md).
+directory). Full threat model in [SAFETY.md](SAFETY.md). `--dry-run` runs one
+check and prints exactly what would be restarted or deleted (prefixed
+`[DRY RUN]`) without doing it or notifying anyone - a safe way to validate a
+new `watchdog_config.yaml` before turning `--auto-remediate` on for real.
 
-`monitor/notifier.py` fans an alert out to every channel you've configured —
+`monitor/notifier.py` fans an alert out to every channel you've configured -
 Discord, Slack, and/or PagerDuty (via the Events API v2) - so it's safe to
-set all three; nothing extra fires for channels you leave unconfigured.
+set all three; nothing extra fires for channels you leave unconfigured. When
+PagerDuty is configured, the watchdog also tracks which breach types have an
+open incident and calls PagerDuty's resolve endpoint automatically once
+things recover, instead of leaving pages open forever.
 
 Once you have some incident history, generate a dashboard:
 
@@ -142,6 +160,15 @@ a recent-incidents table.
 </p>
 
 <p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history, not a mockup.</sub></p>
+
+If you already run Prometheus and Grafana, you can scrape the watchdog
+directly instead of (or alongside) the dashboard - `--metrics-port` starts a
+tiny, dependency-free `/metrics` endpoint (`monitor/prometheus_exporter.py`)
+exposing `hermes_watchdog_cpu_percent`, `hermes_watchdog_mem_percent`,
+`hermes_watchdog_disk_percent`, `hermes_watchdog_failed_services_count`, and
+a `hermes_watchdog_breach{metric="..."}` gauge per tracked metric. It binds
+to `127.0.0.1` by default and is read-only - it cannot be used to control
+the watchdog.
 
 ---
 
@@ -225,8 +252,9 @@ graph LR
     MON --> WATCHDOG["🐍 watchdog.py<br/>← real-host monitor, no Hermes needed"]
     MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack / PagerDuty"]
     MON --> DASH["🐍 dashboard.py<br/>← offline HTML dashboard"]
+    MON --> PROM["🐍 prometheus_exporter.py<br/>← optional /metrics endpoint"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 55 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 66 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -242,6 +270,7 @@ graph LR
     style WATCHDOG fill:#1a4731,color:#fff
     style NOTIFY fill:#1a4731,color:#fff
     style DASH fill:#1a4731,color:#fff
+    style PROM fill:#1a4731,color:#fff
     style CIWORKFLOW fill:#2d2d2d,color:#fff
 ```
 
@@ -305,12 +334,12 @@ The training environment uses a multi-component reward that captures real SRE qu
 
 ```mermaid
 pie title Reward Components
-    "Resolution — Did the incident get fixed?" : 50
-    "RCA Quality — Root cause explained?" : 15
-    "Report Quality — Post-mortem written?" : 15
-    "Skill Created — Prevention skill added?" : 10
-    "Response Speed — Fast MTTR?" : 5
-    "Tool Efficiency — Minimal tool calls?" : 5
+    "Resolution - Did the incident get fixed?" : 50
+    "RCA Quality - Root cause explained?" : 15
+    "Report Quality - Post-mortem written?" : 15
+    "Skill Created - Prevention skill added?" : 10
+    "Response Speed - Fast MTTR?" : 5
+    "Tool Efficiency - Minimal tool calls?" : 5
 ```
 
 ---
@@ -339,8 +368,8 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (55 tests: scenarios, reward function, skill file,
-# demo script, notifier incl. PagerDuty, watchdog, dashboard)
+# Run full test suite (66 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. PagerDuty, watchdog dry-run/resolve wiring, Prometheus exporter, dashboard)
 pytest tests/ -v
 
 # Run specific test classes
@@ -350,7 +379,7 @@ pytest tests/test_monitor.py::TestSafeRemediation -v
 ```
 
 CI runs both of the above automatically on every push and PR across Python
-3.10, 3.11, and 3.12 — see the badge at the top of this README or
+3.10, 3.11, and 3.12 - see the badge at the top of this README or
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ---
@@ -365,9 +394,9 @@ CI runs both of the above automatically on every push and PR across Python
 
 4. **Closes the training loop.** The Atropos RL environment means this isn't just a demo - it's a path to training models that are genuinely better at agentic SRE tasks.
 
-5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all — just `ANTHROPIC_API_KEY` — and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
+5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 55 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 66 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 
@@ -383,20 +412,20 @@ CI runs both of the above automatically on every push and PR across Python
 ## Contributing
 
 New incident scenarios, notifier integrations, and dashboard improvements are
-welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and
+welcome - see [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and
 what a good PR looks like, and [ROADMAP.md](ROADMAP.md) if you want ideas.
-This project is meant to keep growing — if you use it and hit a rough edge,
+This project is meant to keep growing - if you use it and hit a rough edge,
 please open an issue even if you don't have time to fix it yourself.
 
 ## Safety
 
 Please read [SAFETY.md](SAFETY.md) before pointing anything in this repo at
-a machine you care about — demo mode and the watchdog have very different
+a machine you care about - demo mode and the watchdog have very different
 risk profiles.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
 
 ---
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-incident-commander"
 version = "2.1.0"
-description = "Autonomous SRE agent that detects, diagnoses, heals, and learns from production incidents — with a standalone real-host watchdog that needs no Hermes install, just an Anthropic API key."
+description = "Autonomous SRE agent that detects, diagnoses, heals, and learns from production incidents - with a standalone real-host watchdog that needs no Hermes install, just an Anthropic API key."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

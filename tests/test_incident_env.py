@@ -1,5 +1,5 @@
 """
-Hermes Incident Commander — Test Suite
+Hermes Incident Commander - Test Suite
 =======================================
 Run with:
     pytest tests/ -v

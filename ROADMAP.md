@@ -11,14 +11,6 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Under consideration
 
-- **Prometheus `/metrics` endpoint** - expose the watchdog's collected
-  metrics (cpu/mem/disk/failed services, breach counts) in Prometheus
-  exposition format so it can plug into existing observability stacks
-  instead of only writing its own history.
-- **`--dry-run` mode for the watchdog** - show exactly what
-  `safe_remediate()` *would* do against the current allow-list without
-  actually restarting a service or deleting a file. Useful for testing a
-  new `watchdog_config.yaml` before trusting it with `--auto-remediate`.
 - **Multi-host watchdog** - one watchdog process polling several hosts over
   SSH instead of one process per host. Needs careful thought before it
   touches `SAFETY.md`'s threat model - remote command execution changes the
@@ -34,13 +26,11 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **One-command install scripts** - a `curl | bash`-style installer (or
   Ansible role) that sets up the watchdog as a systemd service, on a couple
   of common targets (Ubuntu/Debian on a plain VM, DigitalOcean, Hetzner).
-- **PagerDuty resolve wiring in `watchdog.py`** - v2.1.0 added
-  `Notifier.resolve_pagerduty_event()`, but nothing calls it yet. The
-  watchdog would need to track a `dedup_key` per open incident and resolve
-  it once metrics return to normal for N consecutive checks.
 - **More cloud-native scenarios** - e.g. an ECS task stuck in a
   deploy/rollback loop, or a Lambda cold-start/timeout spike - to round out
   `kubernetes`/`docker` with a couple of managed-platform equivalents.
+- **Grafana dashboard JSON** to go with the new `/metrics` endpoint, so
+  `--metrics-port` users don't have to build their own panels from scratch.
 
 ## Explicitly out of scope (for now)
 

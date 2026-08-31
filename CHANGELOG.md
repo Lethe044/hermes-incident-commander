@@ -22,8 +22,27 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Live GitHub star-history chart embedded in the README.
 - `ROADMAP.md` - a living backlog of ideas for continuous development,
   separate from the changelog so it doesn't need a release to be updated.
-- 9 new tests in `tests/test_monitor.py` (`TestPagerDuty`) covering trigger,
-  resolve, severity fallback, and `send_alert` integration. 55 tests total.
+- **`--dry-run` mode** for the watchdog (`python -m monitor.watchdog --dry-run`)
+  - runs one check, shows exactly what `--auto-remediate` would restart or
+  delete (prefixed `[DRY RUN]`), and does not touch services, files, or
+  notification channels. Lets you validate a new `watchdog_config.yaml`
+  before trusting it.
+- **PagerDuty resolve wiring** - the watchdog now tracks which breach types
+  have an open PagerDuty incident (persisted to
+  `~/.hermes/incidents/open_pagerduty_incidents.json` so it survives across
+  `--once`/cron invocations) and calls `resolve_pagerduty_event()`
+  automatically once a breach recovers, instead of leaving incidents open
+  forever.
+- **Prometheus `/metrics` endpoint** (`monitor/prometheus_exporter.py`) -
+  optional, stdlib-only (`http.server`) exporter. Start it with
+  `python -m monitor.watchdog --metrics-port 9877`; binds to `127.0.0.1` by
+  default. Exposes `hermes_watchdog_cpu_percent`,
+  `hermes_watchdog_mem_percent`, `hermes_watchdog_disk_percent`,
+  `hermes_watchdog_failed_services_count`, and a `hermes_watchdog_breach`
+  gauge per metric.
+- 20 new tests in `tests/test_monitor.py` covering PagerDuty (9), dry-run
+  remediation (4), `run_once` open/resolve wiring (4), and the Prometheus
+  exporter (3). 66 tests total.
 
 ### Changed
 - `SAFETY.md` and `.env.example` updated to cover `PAGERDUTY_ROUTING_KEY` as
@@ -32,18 +51,24 @@ This project follows [Semantic Versioning](https://semver.org/).
   block and a PagerDuty line to the notification templates and integration
   points; bumped skill `version` to `1.1`.
 
+### Fixed
+- Repo-wide em dash cleanup - all em dashes replaced with regular hyphens
+  across every `.py`, `.md`, `.yaml`, and `.toml` file (code, comments,
+  docs, and the dashboard's "not auto-fixed" table glyph), per the
+  project's style rule.
+
 ## [2.0.0] - Released
 
 ### Added
-- **Standalone Watchdog** (`monitor/watchdog.py`) — continuously monitors
+- **Standalone Watchdog** (`monitor/watchdog.py`) - continuously monitors
   real host metrics (CPU, memory, disk, failed systemd services) via
   `psutil`, triages breaches with Claude, writes structured incident
   reports, and can optionally perform **safe, allow-listed** auto-remediation
   (restart a whitelisted service, clean a whitelisted log directory). Works
-  with just `ANTHROPIC_API_KEY` — no Hermes Agent installation required.
-- **Notifier module** (`monitor/notifier.py`) — dependency-free Discord and
+  with just `ANTHROPIC_API_KEY` - no Hermes Agent installation required.
+- **Notifier module** (`monitor/notifier.py`) - dependency-free Discord and
   Slack webhook alerts (stdlib `urllib` only), with a `--test-notify` helper.
-- **Offline HTML dashboard** (`monitor/dashboard.py`) — generates a single,
+- **Offline HTML dashboard** (`monitor/dashboard.py`) - generates a single,
   self-contained, dependency-free dashboard from incident history, with
   severity breakdown and a recent-incidents table. No server, no CDN.
 - Two new incident scenarios: `docker-container-crash` (P1) and
@@ -52,7 +77,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   allow-listed auto-remediation.
 - `pyproject.toml` with console-script entry points (`hermes-ic-demo`,
   `hermes-ic-watchdog`, `hermes-ic-dashboard`, `hermes-ic-notify-test`).
-- GitHub Actions CI (`.github/workflows/ci.yml`) — runs the smoke test and
+- GitHub Actions CI (`.github/workflows/ci.yml`) - runs the smoke test and
   full pytest suite on Python 3.10/3.11/3.12 on every push and PR, plus a
   `ruff` lint job.
 - Issue templates, PR template, and `CONTRIBUTING.md`.
@@ -63,7 +88,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 - `README.md` restructured with a "Standalone Mode" quickstart, badges, and
   an updated architecture/scenario overview.
 
-## [1.0.0] — Hackathon submission
+## [1.0.0] - Hackathon submission
 
 - Initial release: Atropos RL environment, `demo/demo_incident.py`,
   `skills/incident-commander/SKILL.md`, 5 incident scenarios, test suite.

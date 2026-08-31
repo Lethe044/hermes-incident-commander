@@ -1,6 +1,6 @@
-# Setup Guide — Hermes Incident Commander
+# Setup Guide - Hermes Incident Commander
 
-## Quick Start (Demo Only — No Hermes Required)
+## Quick Start (Demo Only - No Hermes Required)
 
 ```bash
 # 1. Clone the repo
@@ -36,9 +36,9 @@ hermes setup
 ```
 
 Choose your model provider:
-- **Nous Portal** (recommended) — OAuth login, access to Hermes models
-- **OpenRouter** — API key, access to all models
-- **Custom endpoint** — VLLM, Ollama, or any OpenAI-compatible API
+- **Nous Portal** (recommended) - OAuth login, access to Hermes models
+- **OpenRouter** - API key, access to all models
+- **Custom endpoint** - VLLM, Ollama, or any OpenAI-compatible API
 
 ### Step 3: Install the Incident Commander Skill
 
@@ -60,9 +60,9 @@ hermes gateway setup
 ```
 
 Follow the prompts to connect:
-- **Telegram** (recommended) — Create a bot via @BotFather, paste the token
-- **Discord** — Create a bot in Discord Developer Portal
-- **Slack** — Create a Slack app with webhook URL
+- **Telegram** (recommended) - Create a bot via @BotFather, paste the token
+- **Discord** - Create a bot in Discord Developer Portal
+- **Slack** - Create a Slack app with webhook URL
 
 Then start the gateway:
 ```bash

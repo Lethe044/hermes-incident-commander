@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Hermes Incident Commander — Standalone Watchdog
+Hermes Incident Commander - Standalone Watchdog
 ==================================================
 Continuously monitors REAL host metrics (CPU, memory, disk, failed systemd
 units) and, when a threshold is breached for several consecutive checks,
 asks Claude to triage and diagnose the situation, writes a structured
-incident report, sends a Discord/Slack alert, and — only if you explicitly
-opt in — performs SAFE, allow-listed auto-remediation (restart a whitelisted
+incident report, sends a Discord/Slack alert, and - only if you explicitly
+opt in - performs SAFE, allow-listed auto-remediation (restart a whitelisted
 service, clean a whitelisted log directory). It never lets the model run
 arbitrary shell commands on your machine.
 
-This module does NOT require a Hermes Agent installation — only
+This module does NOT require a Hermes Agent installation - only
 `pip install psutil anthropic pyyaml` and an ANTHROPIC_API_KEY. This makes
 Incident Commander usable as a real always-on tool, not just a hackathon demo.
 
@@ -18,8 +18,10 @@ Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
     python -m monitor.watchdog                       # observe-only, safe default
     python -m monitor.watchdog --once                 # single check, good for cron/CI
+    python -m monitor.watchdog --dry-run               # preview what auto-remediation would do
     python -m monitor.watchdog --auto-remediate        # opt in to safe auto-fixes
     python -m monitor.watchdog --config monitor/watchdog_config.yaml
+    python -m monitor.watchdog --metrics-port 9877      # also serve Prometheus /metrics
 
 See SAFETY.md for the full threat model of --auto-remediate.
 """
@@ -57,9 +59,11 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from monitor.notifier import Notifier
+from monitor.prometheus_exporter import start_metrics_server, update_latest_metrics
 
 INCIDENT_DIR = Path.home() / ".hermes" / "incidents"
 HISTORY_LOG = INCIDENT_DIR / "history.jsonl"
+OPEN_INCIDENTS_FILE = INCIDENT_DIR / "open_pagerduty_incidents.json"
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -100,7 +104,7 @@ class WatchdogConfig:
 
 
 # ---------------------------------------------------------------------------
-# Metric collection (real, read-only — no shell exec required)
+# Metric collection (real, read-only - no shell exec required)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -139,7 +143,7 @@ def collect_metrics(cfg: WatchdogConfig) -> Metrics:
                 if result.stdout.strip() == "failed":
                     failed.append(svc)
             except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass  # systemd not available (e.g. macOS, containers) — skip gracefully
+                pass  # systemd not available (e.g. macOS, containers) - skip gracefully
 
     return Metrics(
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -151,11 +155,11 @@ def collect_metrics(cfg: WatchdogConfig) -> Metrics:
 
 
 # ---------------------------------------------------------------------------
-# Claude-based triage (analysis only — no tool use, no shell access for the model)
+# Claude-based triage (analysis only - no tool use, no shell access for the model)
 # ---------------------------------------------------------------------------
 
 TRIAGE_SYSTEM_PROMPT = """You are Hermes Incident Commander, an SRE assistant performing
-remote triage from a metrics snapshot. You do NOT have direct shell access — you only see
+remote triage from a metrics snapshot. You do NOT have direct shell access - you only see
 the numbers provided. Respond with ONLY a JSON object (no markdown fences, no prose)
 with exactly these keys:
 
@@ -189,7 +193,7 @@ def triage_with_claude(metrics: Metrics, breaches: dict[str, bool], cfg: Watchdo
         f"- Failed systemd services: {metrics.failed_services or 'none'}\n"
         f"- Breached thresholds (sustained for {cfg.consecutive_breaches_required} consecutive "
         f"checks): {breached}\n\n"
-        f"Recommended actions may only reference these allow-listed operations — do not "
+        f"Recommended actions may only reference these allow-listed operations - do not "
         f"invent others: restart one of {cfg.remediation_allowlist.get('restart_services', [])}, "
         f"or clean old files in one of {cfg.remediation_allowlist.get('clean_log_dirs', [])}.\n"
         f"Produce the JSON object now."
@@ -222,14 +226,15 @@ def triage_with_claude(metrics: Metrics, breaches: dict[str, bool], cfg: Watchdo
 
 
 # ---------------------------------------------------------------------------
-# Safe, allow-listed remediation — NEVER arbitrary shell execution
+# Safe, allow-listed remediation - NEVER arbitrary shell execution
 # ---------------------------------------------------------------------------
 
-def safe_remediate(diagnosis: dict[str, Any], cfg: WatchdogConfig) -> list[str]:
+def safe_remediate(diagnosis: dict[str, Any], cfg: WatchdogConfig, dry_run: bool = False) -> list[str]:
     """Execute only actions that match the allow-list. Returns a list of
-    human-readable descriptions of what was actually done."""
+    human-readable descriptions of what was actually done (or, in dry-run
+    mode, what *would* be done - nothing is executed or deleted)."""
     performed: list[str] = []
-    if not cfg.auto_remediate:
+    if not cfg.auto_remediate and not dry_run:
         return performed
 
     actions = diagnosis.get("recommended_actions", [])
@@ -242,6 +247,9 @@ def safe_remediate(diagnosis: dict[str, Any], cfg: WatchdogConfig) -> list[str]:
 
         for svc in restart_allowed:
             if svc.lower() in action_lower and "restart" in action_lower:
+                if dry_run:
+                    performed.append(f"[DRY RUN] Would restart allow-listed service: {svc}")
+                    continue
                 try:
                     subprocess.run(["systemctl", "restart", svc], timeout=15, check=False)
                     performed.append(f"Restarted allow-listed service: {svc}")
@@ -250,29 +258,84 @@ def safe_remediate(diagnosis: dict[str, Any], cfg: WatchdogConfig) -> list[str]:
 
         for log_dir in clean_allowed:
             if log_dir in action or "clean" in action_lower or "log" in action_lower:
-                removed = _clean_old_files(log_dir, max_age_days)
+                removed = _clean_old_files(log_dir, max_age_days, dry_run=dry_run)
                 if removed:
+                    verb = "Would remove" if dry_run else "Removed"
+                    prefix = "[DRY RUN] " if dry_run else ""
                     performed.append(
-                        f"Removed {removed} file(s) older than {max_age_days}d from {log_dir}"
+                        f"{prefix}{verb} {removed} file(s) older than {max_age_days}d from {log_dir}"
                     )
 
     return performed
 
 
-def _clean_old_files(directory: str, max_age_days: int) -> int:
+def _clean_old_files(directory: str, max_age_days: int, dry_run: bool = False) -> int:
     path = Path(directory)
     if not path.exists() or not path.is_dir():
         return 0
     cutoff = time.time() - max_age_days * 86400
-    removed = 0
+    matched = 0
     for f in path.glob("*.log*"):
         try:
             if f.is_file() and f.stat().st_mtime < cutoff:
-                f.unlink()
-                removed += 1
+                if not dry_run:
+                    f.unlink()
+                matched += 1
         except OSError:
             continue
-    return removed
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# PagerDuty open-incident tracking (so we know what to resolve, and when)
+# ---------------------------------------------------------------------------
+
+def _load_open_incidents() -> dict[str, str]:
+    """Maps a breach key (cpu/mem/disk/service) to the PagerDuty dedup_key
+    currently open for it. Persisted to disk so it survives across
+    `--once` invocations from cron, not just within one `watch_forever`."""
+    if not OPEN_INCIDENTS_FILE.exists():
+        return {}
+    try:
+        return json.loads(OPEN_INCIDENTS_FILE.read_text()) or {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_open_incidents(open_incidents: dict[str, str]) -> None:
+    INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
+    OPEN_INCIDENTS_FILE.write_text(json.dumps(open_incidents))
+
+
+def _resolve_recovered_breaches(
+    breaches: dict[str, bool], notifier: Notifier, quiet: bool = False
+) -> dict[str, str]:
+    """Compares current breaches against the persisted open-incidents file
+    and resolves any PagerDuty incident whose breach has recovered. Returns
+    the (possibly updated) open-incidents mapping."""
+    open_incidents = _load_open_incidents()
+    changed = False
+    for key, is_breached in breaches.items():
+        if not is_breached and key in open_incidents:
+            dedup_key = open_incidents.pop(key)
+            changed = True
+            if notifier.pagerduty_routing_key:
+                notifier.resolve_pagerduty_event(dedup_key)
+                if not quiet:
+                    print(f"  -> PagerDuty incident resolved: {dedup_key}")
+    if changed:
+        _save_open_incidents(open_incidents)
+    return open_incidents
+
+
+def _record_open_incident(breached_keys: list[str], open_incidents: dict[str, str]) -> str:
+    """Registers a new PagerDuty dedup_key for the given breach keys and
+    persists it. Returns the dedup_key to pass to notifier.send_alert()."""
+    dedup_key = "hermes-ic-" + "-".join(sorted(breached_keys))
+    for key in breached_keys:
+        open_incidents[key] = dedup_key
+    _save_open_incidents(open_incidents)
+    return dedup_key
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +357,7 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
 
     report_path.write_text(body + "\n")
 
-    # Structured JSONL record — consumed by monitor/dashboard.py
+    # Structured JSONL record - consumed by monitor/dashboard.py
     with open(HISTORY_LOG, "a") as f:
         f.write(json.dumps({
             "timestamp": metrics.timestamp,
@@ -316,11 +379,14 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
 # Main loop
 # ---------------------------------------------------------------------------
 
-def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False) -> Path | None:
+def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_run: bool = False) -> Path | None:
     """Run a single check. Returns the incident report path if one was triggered."""
     metrics = collect_metrics(cfg)
     breaches = metrics.breaches(cfg)
     breached_any = any(breaches.values())
+    update_latest_metrics(metrics, breaches)
+
+    open_incidents = _resolve_recovered_breaches(breaches, notifier, quiet=quiet)
 
     if not quiet:
         print(
@@ -336,8 +402,21 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False) -> Pa
     diagnosis = triage_with_claude(metrics, breaches, cfg)
     severity = diagnosis.get("severity", "P2")
 
-    performed = safe_remediate(diagnosis, cfg)
+    performed = safe_remediate(diagnosis, cfg, dry_run=dry_run)
     report_path = write_incident(metrics, diagnosis, performed)
+
+    if dry_run:
+        # Don't page anyone or open a PagerDuty incident for a test run - just
+        # show what would have happened. The report is still written so you
+        # can review Claude's full diagnosis.
+        if not quiet:
+            print("  [DRY RUN] No notification sent, no PagerDuty incident opened.")
+            for action in performed:
+                print(f"  {action}")
+        return report_path
+
+    breached_keys = sorted(k for k, v in breaches.items() if v)
+    dedup_key = _record_open_incident(breached_keys, open_incidents)
 
     if notifier.configured:
         notifier.send_alert(
@@ -348,6 +427,7 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False) -> Pa
                 f"Report: {report_path}"
                 + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
             ),
+            dedup_key=dedup_key,
         )
 
     return report_path
@@ -364,6 +444,7 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
     while True:
         metrics = collect_metrics(cfg)
         breaches = metrics.breaches(cfg)
+        update_latest_metrics(metrics, breaches)
 
         print(
             f"[{metrics.timestamp}] cpu={metrics.cpu_percent:.1f}% "
@@ -371,7 +452,10 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
             f"failed_services={metrics.failed_services or 'none'}"
         )
 
+        open_incidents = _resolve_recovered_breaches(breaches, notifier)
+
         fire = False
+        fired_keys: list[str] = []
         for key, is_breached in breaches.items():
             if is_breached:
                 consecutive[key] += 1
@@ -383,6 +467,7 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
                 cooled_down = now - last_incident_at.get(key, 0) > cfg.cooldown_minutes * 60
                 if cooled_down:
                     fire = True
+                    fired_keys.append(key)
                     last_incident_at[key] = now
                     consecutive[key] = 0
 
@@ -390,6 +475,7 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
             diagnosis = triage_with_claude(metrics, breaches, cfg)
             performed = safe_remediate(diagnosis, cfg)
             report_path = write_incident(metrics, diagnosis, performed)
+            dedup_key = _record_open_incident(fired_keys, open_incidents)
             print(f"  -> Incident written: {report_path}")
 
             if notifier.configured:
@@ -400,6 +486,7 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
                         f"{diagnosis.get('root_cause_hypothesis', '')}\nReport: {report_path}"
                         + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
                     ),
+                    dedup_key=dedup_key,
                 )
 
         iterations += 1
@@ -413,10 +500,19 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Hermes Incident Commander — Standalone Watchdog")
+    parser = argparse.ArgumentParser(description="Hermes Incident Commander - Standalone Watchdog")
     parser.add_argument("--config", help="Path to a YAML config file")
     parser.add_argument("--once", action="store_true", help="Run a single check and exit (good for cron)")
     parser.add_argument("--auto-remediate", action="store_true", help="Opt in to safe, allow-listed auto-fixes")
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Run a single check and show what --auto-remediate WOULD do, without doing it "
+             "(nothing is restarted or deleted). Implies --once.",
+    )
+    parser.add_argument(
+        "--metrics-port", type=int, default=None,
+        help="Serve Prometheus-format metrics on this port at /metrics (binds 127.0.0.1)",
+    )
     parser.add_argument("--cpu-threshold", type=float, default=None)
     parser.add_argument("--mem-threshold", type=float, default=None)
     parser.add_argument("--disk-threshold", type=float, default=None)
@@ -445,9 +541,17 @@ def main() -> None:
         print("Error: psutil is required. Install with: pip install psutil", file=sys.stderr)
         sys.exit(1)
 
-    if args.once:
+    if args.metrics_port:
+        start_metrics_server(args.metrics_port)
+        print(f"Prometheus metrics available at http://127.0.0.1:{args.metrics_port}/metrics")
+
+    if args.dry_run:
+        print("Running in DRY RUN mode: showing what --auto-remediate would do, changing nothing.")
+        report = run_once(cfg, notifier, dry_run=True)
+        print(f"Incident triggered: {report}" if report else "No breach detected - all clear.")
+    elif args.once:
         report = run_once(cfg, notifier)
-        print(f"Incident triggered: {report}" if report else "No breach detected — all clear.")
+        print(f"Incident triggered: {report}" if report else "No breach detected - all clear.")
     else:
         try:
             watch_forever(cfg, notifier)

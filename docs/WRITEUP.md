@@ -1,4 +1,4 @@
-# Hermes Incident Commander — Technical Writeup
+# Hermes Incident Commander - Technical Writeup
 
 ## Submission for: "Show us what Hermes Agent can do"
 ## Category: Creative + Useful + Technical
@@ -7,7 +7,7 @@
 
 ## What I Built
 
-**Hermes Incident Commander** is an autonomous Site Reliability Engineering (SRE) agent that detects, diagnoses, and heals production infrastructure — and learns from every incident it resolves.
+**Hermes Incident Commander** is an autonomous Site Reliability Engineering (SRE) agent that detects, diagnoses, and heals production infrastructure - and learns from every incident it resolves.
 
 The core insight: production incidents follow repeating patterns, but humans have to rediscover these patterns every time because institutional knowledge lives in human heads and Confluence pages nobody reads. Hermes changes this. Every incident it resolves adds to a growing knowledge base. Over weeks, it becomes an expert on *your specific infrastructure*.
 
@@ -28,7 +28,7 @@ The core insight: production incidents follow repeating patterns, but humans hav
 After every incident, Hermes updates `MEMORY.md` with:
 - Infrastructure topology it learned ("nginx depends on postgres, which depends on /var/lib/pg")
 - Failure correlation patterns ("high CPU on app-server usually precedes OOM in 20 min")
-- Time-of-day patterns ("deploys happen at 14:00 UTC on Fridays — watch for spikes")
+- Time-of-day patterns ("deploys happen at 14:00 UTC on Fridays - watch for spikes")
 - Which remediations worked and which didn't
 
 This isn't a gimmick. After a month of operation, Hermes has a system-specific knowledge base no junior engineer can match.
@@ -50,7 +50,7 @@ Three levels of monitoring, all in natural language:
 
 ### Gateway (Telegram/Discord/Slack)
 Real-time incident notifications:
-- `🚨 P0 INCIDENT DECLARED` with impact summary — within 60 seconds of detection
+- `🚨 P0 INCIDENT DECLARED` with impact summary - within 60 seconds of detection
 - Progress updates every minute during active incidents
 - `✅ INCIDENT RESOLVED` with MTTR and root cause summary
 - Daily briefings so the team stays informed without opening a dashboard
@@ -67,7 +67,7 @@ Main agent: Synthesize findings, identify root cause, apply fix
 This cuts investigation time from sequential to parallel.
 
 ### Session Search (FTS5)
-"Have we seen this OOM error before?" — Hermes searches all past conversations and incidents using full-text search, surfaces relevant prior art from its own history.
+"Have we seen this OOM error before?" - Hermes searches all past conversations and incidents using full-text search, surfaces relevant prior art from its own history.
 
 ### execute_code
 Collapses multi-step diagnostic pipelines. Instead of 8 separate tool calls to gather system state, one `execute_code` call runs all diagnostics in parallel and returns a structured summary. Fewer tokens, lower latency, same information.
@@ -94,13 +94,13 @@ The `environments/incident_env.py` integrates with Hermes's Atropos framework to
 
 This directly optimizes for what SRE teams actually care about: MTTR, documentation, and knowledge accumulation.
 
-**Training loop**: GRPO via Atropos — the same framework NousResearch uses for training Hermes, Nomos, and Psyche models. A model trained on this environment gets measurably better at agentic incident response.
+**Training loop**: GRPO via Atropos - the same framework NousResearch uses for training Hermes, Nomos, and Psyche models. A model trained on this environment gets measurably better at agentic incident response.
 
 ---
 
 ## What Makes It Novel
 
-1. **The self-improvement loop is real.** Other agent projects demonstrate a capability once. This one compounds — each resolved incident makes Hermes more capable for the next one.
+1. **The self-improvement loop is real.** Other agent projects demonstrate a capability once. This one compounds - each resolved incident makes Hermes more capable for the next one.
 
 2. **The RL environment is production-quality.** Five carefully designed scenarios covering the most common incident categories, with multi-component rewards that capture real SRE quality metrics.
 

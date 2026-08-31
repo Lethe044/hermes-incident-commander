@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Hermes Incident Commander — Interactive Demo
+Hermes Incident Commander - Interactive Demo
 ============================================
 Run this to see Incident Commander in action without a full Hermes
 installation. Uses the Anthropic API directly to simulate Hermes's
@@ -41,7 +41,7 @@ try:
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
-    print("Tip: pip install rich  — for beautiful output")
+    print("Tip: pip install rich  - for beautiful output")
 
 # ── Anthropic SDK ─────────────────────────────────────────────────────────────
 try:
@@ -163,7 +163,7 @@ def dispatch_tool(tool_name: str, tool_input: dict[str, Any]) -> str:
 
 DEMO_SCENARIOS = {
     "disk-full-logs": {
-        "title": "🚨 Disk 95% full — Log files exploded",
+        "title": "🚨 Disk 95% full - Log files exploded",
         "severity": "P1",
         "setup": [
             "mkdir -p /tmp/hermes_demo_logs",
@@ -185,7 +185,7 @@ DEMO_SCENARIOS = {
         ),
     },
     "svc-crash-nginx": {
-        "title": "🚨 nginx crashed — Website unreachable",
+        "title": "🚨 nginx crashed - Website unreachable",
         "severity": "P0",
         "setup": [
             "echo 'SERVICE_INCIDENT_ACTIVE=1' > /tmp/hermes_incident_marker",
@@ -196,14 +196,14 @@ DEMO_SCENARIOS = {
         "prompt": (
             "ALERT: Our website is down! Users are getting connection refused. "
             "nginx was running 10 minutes ago but now it's not responding. "
-            "This is a P0 incident — we're losing revenue every minute. "
+            "This is a P0 incident - we're losing revenue every minute. "
             "Investigate the system, check what services are running or failing, "
             "identify the problem, attempt to fix it, "
             "and write a detailed post-incident report to ~/.hermes/incidents/."
         ),
     },
     "cpu-runaway-process": {
-        "title": "🚨 CPU at 95% — Runaway computation detected",
+        "title": "🚨 CPU at 95% - Runaway computation detected",
         "severity": "P2",
         "setup": [
             # Spin up a moderate CPU consumer (not too heavy for demo)
@@ -229,7 +229,7 @@ DEMO_SCENARIOS = {
         ),
     },
     "network-unreachable": {
-        "title": "🚨 Upstream dependency unreachable — timeouts spiking",
+        "title": "🚨 Upstream dependency unreachable - timeouts spiking",
         "severity": "P1",
         "setup": [
             "mkdir -p /tmp/hermes_net_check",
@@ -282,7 +282,7 @@ DEMO_SCENARIOS = {
 # Agent loop
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are Hermes Incident Commander — an autonomous Site Reliability Engineer.
+SYSTEM_PROMPT = """You are Hermes Incident Commander - an autonomous Site Reliability Engineer.
 
 When you receive an incident alert:
 1. Immediately run diagnostics (uptime, df -h, free -h, ps aux, systemctl list-units --failed)
@@ -294,7 +294,7 @@ When you receive an incident alert:
 7. Create a prevention skill SKILL.md in ~/.hermes/skills/<category>-prevention/
 
 Be autonomous and thorough. Do not ask for permission for safe diagnostic operations.
-Speed matters — every minute of downtime costs money."""
+Speed matters - every minute of downtime costs money."""
 
 
 def run_incident_agent(
@@ -440,7 +440,7 @@ def run_incident_agent(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hermes Incident Commander — Interactive Demo"
+        description="Hermes Incident Commander - Interactive Demo"
     )
     parser.add_argument(
         "--scenario",

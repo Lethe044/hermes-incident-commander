@@ -1,4 +1,4 @@
-# Hermes Incident Commander — Watchdog Configuration Example
+# Hermes Incident Commander - Watchdog Configuration Example
 # =============================================================
 # Copy this file, edit it, and run:
 #   python -m monitor.watchdog --config monitor/watchdog_config.yaml
@@ -20,7 +20,7 @@ watched_services:
   - hermes-worker
 
 # Auto-remediation is OFF by default. Even when enabled with --auto-remediate,
-# ONLY the operations below are ever allowed — the model can never run
+# ONLY the operations below are ever allowed - the model can never run
 # arbitrary shell commands. See SAFETY.md for the full threat model.
 remediation_allowlist:
   restart_services:

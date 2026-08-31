@@ -1,4 +1,4 @@
-# Hermes Incident Commander — Atropos Training Config
+# Hermes Incident Commander - Atropos Training Config
 # =====================================================
 # Use with:
 #   python environments/incident_env.py serve --config environments/incident_config.yaml

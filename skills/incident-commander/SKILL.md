@@ -40,7 +40,7 @@ systemctl list-units --failed
 journalctl -p err -n 50 --no-pager
 ```
 
-### 2. TRIAGE — Severity Classification
+### 2. TRIAGE - Severity Classification
 
 | Severity | Criteria | Response SLA |
 |----------|----------|-------------|
@@ -51,7 +51,7 @@ journalctl -p err -n 50 --no-pager
 
 Announce severity via gateway immediately after triage.
 
-### 3. DIAGNOSE — Root Cause Analysis
+### 3. DIAGNOSE - Root Cause Analysis
 
 **High CPU:**
 ```bash
@@ -95,27 +95,27 @@ kubectl logs <pod> -n <namespace> --previous
 kubectl get events -n <namespace> --sort-by=.lastTimestamp | tail -20
 ```
 
-### 4. REMEDIATE — Self-Healing Actions
+### 4. REMEDIATE - Self-Healing Actions
 
 Execute fixes in order of safety (least-destructive first):
 
-**Tier 1 — Safe (no approval needed):**
+**Tier 1 - Safe (no approval needed):**
 - Clear temp files and old logs
 - Restart failed non-critical services
 - Adjust kernel parameters (sysctl)
 - Kill runaway processes (non-PID-1)
 
-**Tier 2 — Moderate (warn user, proceed after 30s unless cancelled):**
+**Tier 2 - Moderate (warn user, proceed after 30s unless cancelled):**
 - Restart critical services
 - Rollback last deployment
 - Scale resources (if cloud API available)
 
-**Tier 3 — Destructive (explicit approval required):**
+**Tier 3 - Destructive (explicit approval required):**
 - Data deletion
 - Node termination
 - Database operations
 
-### 5. VERIFY — Confirm Resolution
+### 5. VERIFY - Confirm Resolution
 
 Run the same diagnostics as step 1. Compare before/after metrics.
 Declare resolution only when:
@@ -123,7 +123,7 @@ Declare resolution only when:
 - Error rate returns to baseline
 - Service response time is normal
 
-### 6. DOCUMENT — Post-Incident Report
+### 6. DOCUMENT - Post-Incident Report
 
 Always write a structured report to `~/.hermes/incidents/<timestamp>-<slug>.md`:
 
@@ -135,11 +135,11 @@ Always write a structured report to `~/.hermes/incidents/<timestamp>-<slug>.md`:
 **Impact:** <description>
 
 ## Timeline
-- HH:MM — Detection
-- HH:MM — Triage complete
-- HH:MM — Root cause identified
-- HH:MM — Remediation applied
-- HH:MM — Resolution confirmed
+- HH:MM - Detection
+- HH:MM - Triage complete
+- HH:MM - Root cause identified
+- HH:MM - Remediation applied
+- HH:MM - Resolution confirmed
 
 ## Root Cause
 <clear technical explanation>
@@ -156,7 +156,7 @@ Always write a structured report to `~/.hermes/incidents/<timestamp>-<slug>.md`:
 - MTTR (Mean Time to Resolve): X min
 ```
 
-### 7. LEARN — Skill Auto-Creation
+### 7. LEARN - Skill Auto-Creation
 
 After every resolved incident, analyze the root cause and **create a new
 prevention skill** if the pattern is novel:
@@ -188,13 +188,13 @@ description: >
 When asked to set up monitoring, install these cron jobs:
 
 ```
-# Every 5 minutes — critical metrics
+# Every 5 minutes - critical metrics
 */5 * * * * Run incident health check, alert on P0/P1 via Telegram
 
-# Every hour — comprehensive audit  
+# Every hour - comprehensive audit  
 0 * * * * Run full system audit, save report to ~/.hermes/incidents/
 
-# Daily at 08:00 — weekly trend analysis
+# Daily at 08:00 - weekly trend analysis
 0 8 * * * Analyze last 24h incidents, send morning briefing to Telegram
 ```
 
@@ -221,7 +221,7 @@ After each incident, update MEMORY.md with:
 - Infrastructure topology learned over time
 
 This builds a system-specific knowledge base that improves response quality
-over time — Hermes gets smarter about YOUR infrastructure specifically.
+over time - Hermes gets smarter about YOUR infrastructure specifically.
 
 ## Notification Templates
 
@@ -251,9 +251,9 @@ here if you're wiring PagerDuty into a live Hermes gateway.
 
 ## Integration Points
 
-- **Hermes Memory** — incident history, infrastructure topology, known-bad patterns
+- **Hermes Memory** - incident history, infrastructure topology, known-bad patterns
 - **Hermes Gateway** - real-time Telegram/Discord/Slack/PagerDuty alerts
-- **Hermes Cron** — scheduled health checks, daily briefings
-- **Hermes Subagents** — parallel investigation of multiple services
-- **Hermes Skills** — auto-creates new skills from incident learnings
-- **Hermes Session Search** — "have we seen this error before?"
+- **Hermes Cron** - scheduled health checks, daily briefings
+- **Hermes Subagents** - parallel investigation of multiple services
+- **Hermes Skills** - auto-creates new skills from incident learnings
+- **Hermes Session Search** - "have we seen this error before?"

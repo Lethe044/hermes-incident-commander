@@ -1,6 +1,6 @@
 # Contributing to Hermes Incident Commander
 
-Contributions are welcome — new incident scenarios, notifier integrations,
+Contributions are welcome - new incident scenarios, notifier integrations,
 dashboard improvements, or bug fixes. See [ROADMAP.md](ROADMAP.md) for a
 running list of ideas if you're looking for something to work on.
 
@@ -15,7 +15,7 @@ pip install -e ".[dev]"
 ## Running checks locally
 
 ```bash
-# Fast — no API key, no dependencies beyond requirements.txt
+# Fast - no API key, no dependencies beyond requirements.txt
 python environments/incident_env.py --smoke-test
 
 # Full suite
@@ -35,17 +35,17 @@ ruff check .
      packages, wrapped so they degrade gracefully (`|| true`) on systems
      where the tooling isn't available
    - `success_criteria` (and optionally `partial_criteria`) as bash one-liners
-     that exit 0 when — and only when — the incident is actually resolved
+     that exit 0 when - and only when - the incident is actually resolved
 2. If it's a common enough scenario, add a matching entry to
    `DEMO_SCENARIOS` in `demo/demo_incident.py` so it's runnable standalone.
 3. Add/extend a test in `tests/test_incident_env.py` if you're introducing a
    new category.
-4. Run `pytest tests/ -v` — `test_setup_commands_are_valid_bash_syntax` and
+4. Run `pytest tests/ -v` - `test_setup_commands_are_valid_bash_syntax` and
    `test_success_criteria_are_valid_bash_syntax` will catch syntax mistakes.
 
 ## Adding a new notifier / integration
 
-See `monitor/notifier.py` — add a new `send_*` method or a new webhook type,
+See `monitor/notifier.py` - add a new `send_*` method or a new webhook type,
 keep it dependency-free (stdlib `urllib` only) if possible, and add a test
 in `tests/test_monitor.py` that mocks the HTTP call (no real network access
 in tests).
@@ -53,7 +53,7 @@ in tests).
 ## Code style
 
 - Python 3.10+, type hints where practical.
-- Keep new runtime dependencies to a minimum — this project intentionally
+- Keep new runtime dependencies to a minimum - this project intentionally
   stays lightweight so the standalone tools (`monitor/`) work with just
   `pip install psutil anthropic pyyaml`.
 - Run `ruff check .` before opening a PR.

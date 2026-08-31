@@ -8,14 +8,14 @@ machine you care about.
 
 These give the model **full, unrestricted terminal access** (`terminal`,
 `read_file`, `write_file` tools) inside whatever environment you run them in.
-This is intentional — it's how the agent is trained and evaluated to
+This is intentional - it's how the agent is trained and evaluated to
 diagnose and fix arbitrary incidents.
 
 **Only run these in a disposable sandbox, VM, or container.** Never point
 `demo_incident.py` or the Atropos training environment at a production host,
 your laptop's real filesystem, or anything you can't afford to lose. The
 built-in scenarios only touch `/tmp` and best-effort-installed packages, but
-the *agent's own remediation attempts* are not sandboxed by this project —
+the *agent's own remediation attempts* are not sandboxed by this project -
 that's the RL environment's job (`terminal_backend: docker` in
 `environments/incident_config.yaml`).
 
@@ -27,7 +27,7 @@ constraints:
 
 1. **The model never gets shell access.** `monitor/watchdog.py` collects
    metrics itself (via `psutil` and `systemctl is-failed`, both read-only)
-   and sends only numbers to Claude. Claude's response is parsed as JSON —
+   and sends only numbers to Claude. Claude's response is parsed as JSON -
    there is no code path where model output becomes a shell command.
 
 2. **Remediation is allow-listed, not model-directed.** Even when
@@ -38,7 +38,7 @@ constraints:
    - Deleting files older than `max_log_age_days` inside a directory you
      explicitly listed
    The model's `recommended_actions` are only used to *decide whether* one
-   of your pre-approved actions applies — it cannot introduce a new command,
+   of your pre-approved actions applies - it cannot introduce a new command,
    service, or path.
 
 3. **Auto-remediation defaults to off.** Out of the box, the watchdog only
@@ -52,7 +52,7 @@ constraints:
   `restart_services`) means the watchdog *will* restart it when triggered.
   Review your allow-list like you'd review a cron job that runs as root.
 - `clean_log_dirs` deletes files matching `*.log*` older than the configured
-  age — point it only at directories that exclusively contain logs.
+  age - point it only at directories that exclusively contain logs.
 - Notifications (Discord/Slack webhooks, PagerDuty events) include metrics
   and root-cause text in plaintext/custom_details. Don't put secrets in your
   incident descriptions.
@@ -63,6 +63,12 @@ constraints:
 - A PagerDuty routing key only lets `monitor/notifier.py` trigger/resolve
   events on the single service it's bound to via PagerDuty's Events API v2 -
   it cannot read or modify anything else in your PagerDuty account.
+- `monitor/prometheus_exporter.py` (`--metrics-port`) is read-only and binds
+  to `127.0.0.1` by default - it only ever serves numbers the watchdog has
+  already collected and cannot be used to control the watchdog or reach
+  anything else on the host. If you need a remote Prometheus server to
+  scrape it, put it behind your own reverse proxy or firewall rule rather
+  than binding it to `0.0.0.0`.
 
 ## Reporting a security issue
 

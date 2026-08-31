@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Hermes Incident Commander — Dashboard Generator
+Hermes Incident Commander - Dashboard Generator
 ==================================================
 Renders a single, self-contained, dependency-free HTML dashboard from your
-incident history — no server, no external CDN, no build step. Works offline.
+incident history - no server, no external CDN, no build step. Works offline.
 
 Data sources (in priority order):
-  1. ~/.hermes/incidents/history.jsonl  — structured records written by
+  1. ~/.hermes/incidents/history.jsonl  - structured records written by
      monitor/watchdog.py (preferred: accurate severity/category/metrics).
-  2. ~/.hermes/incidents/*.md           — post-incident reports written by
+  2. ~/.hermes/incidents/*.md           - post-incident reports written by
      the demo or by Hermes itself (parsed heuristically).
 
 Usage:
@@ -86,7 +86,7 @@ def load_records() -> list[dict[str, Any]]:
 
 
 def bar_svg(counts: Counter, width: int = 480, height: int = 160) -> str:
-    """A tiny hand-rolled SVG bar chart — no chart.js / no CDN dependency."""
+    """A tiny hand-rolled SVG bar chart - no chart.js / no CDN dependency."""
     severities = ["P0", "P1", "P2", "P3"]
     max_count = max([counts.get(s, 0) for s in severities] + [1])
     bar_w = width // (len(severities) * 2)
@@ -127,7 +127,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
           <td>{html.escape(str(r.get('timestamp', '')))}</td>
           <td>{html.escape(str(r.get('category', 'unknown')))}</td>
           <td>{html.escape(str(r.get('root_cause', ''))[:120])}</td>
-          <td>{'✅' if r.get('auto_remediated') else '—'}</td>
+          <td>{'✅' if r.get('auto_remediated') else '-'}</td>
           <td>{html.escape(str(r.get('report_file', '')))}</td>
         </tr>""")
 
@@ -137,7 +137,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Hermes Incident Commander — Dashboard</title>
+<title>Hermes Incident Commander - Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {{ color-scheme: dark; }}
@@ -163,7 +163,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
 </style>
 </head>
 <body>
-  <h1>⚕ Hermes Incident Commander — Dashboard</h1>
+  <h1>⚕ Hermes Incident Commander - Dashboard</h1>
   <div class="subtitle">Generated {generated_at} · {total} incident(s) on record</div>
 
   <div class="cards">

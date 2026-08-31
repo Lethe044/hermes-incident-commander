@@ -159,13 +159,16 @@ class Notifier:
             results.append(pd_result)
         return results
 
-    def send_alert(self, severity: str, title_text: str, detail: str) -> list[NotifyResult]:
+    def send_alert(
+        self, severity: str, title_text: str, detail: str, dedup_key: str | None = None
+    ) -> list[NotifyResult]:
         emoji = {"P0": "🚨", "P1": "🔴", "P2": "🟠", "P3": "🟡"}.get(severity, "ℹ️")
         results = self.send(detail, title=f"{emoji} {severity} - {title_text}")
 
         pd_result = self.send_pagerduty_event(
             summary=f"[{severity}] {title_text}: {detail.splitlines()[0]}"[:1024],
             severity=PAGERDUTY_SEVERITY_MAP.get(severity, "error"),
+            dedup_key=dedup_key,
             custom_details={"severity": severity, "title": title_text, "detail": detail},
         )
         if pd_result:

@@ -1,5 +1,5 @@
 """
-Hermes Incident Commander — Atropos RL Environment
+Hermes Incident Commander - Atropos RL Environment
 ===================================================
 Trains Hermes to autonomously resolve production infrastructure incidents.
 
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 # ---------------------------------------------------------------------------
-# Atropos / Hermes imports — available when hermes-agent is installed
+# Atropos / Hermes imports - available when hermes-agent is installed
 # ---------------------------------------------------------------------------
 try:
     from atroposlib.envs.base import ScoredDataGroup
@@ -58,13 +58,13 @@ class IncidentScenario:
 INCIDENT_SCENARIOS: list[IncidentScenario] = [
 
     # ------------------------------------------------------------------
-    # P0 — Total service outage
+    # P0 - Total service outage
     # ------------------------------------------------------------------
     IncidentScenario(
         id="svc-crash-nginx",
         severity="P0",
         category="service",
-        title="nginx crashed — website unreachable",
+        title="nginx crashed - website unreachable",
         system_state={
             "setup_commands": [
                 "apt-get install -y nginx -qq 2>/dev/null || true",
@@ -83,18 +83,18 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
             ALERT: Our website is completely down. Users are getting connection refused.
             nginx is the web server. It was running 10 minutes ago but now it's not
             responding. We don't know why it stopped. Please investigate and fix it ASAP.
-            This is a P0 incident — we're losing revenue every minute.
+            This is a P0 incident - we're losing revenue every minute.
         """).strip(),
     ),
 
     # ------------------------------------------------------------------
-    # P1 — Disk full
+    # P1 - Disk full
     # ------------------------------------------------------------------
     IncidentScenario(
         id="disk-full-logs",
         severity="P1",
         category="disk",
-        title="Disk 95% full — log files exploded",
+        title="Disk 95% full - log files exploded",
         system_state={
             "setup_commands": [
                 "mkdir -p /tmp/fake_logs",
@@ -121,13 +121,13 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
     ),
 
     # ------------------------------------------------------------------
-    # P1 — OOM / Memory pressure
+    # P1 - OOM / Memory pressure
     # ------------------------------------------------------------------
     IncidentScenario(
         id="memory-leak-process",
         severity="P1",
         category="memory",
-        title="Memory exhausted — mystery process eating RAM",
+        title="Memory exhausted - mystery process eating RAM",
         system_state={
             "setup_commands": [
                 # Start a background process that allocates memory
@@ -156,13 +156,13 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
     ),
 
     # ------------------------------------------------------------------
-    # P2 — High CPU
+    # P2 - High CPU
     # ------------------------------------------------------------------
     IncidentScenario(
         id="cpu-runaway-process",
         severity="P2",
         category="cpu",
-        title="CPU at 95% — runaway computation",
+        title="CPU at 95% - runaway computation",
         system_state={
             "setup_commands": [
                 # Start a CPU-burning process
@@ -190,7 +190,7 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
     ),
 
     # ------------------------------------------------------------------
-    # P2 — Failed systemd service (custom)
+    # P2 - Failed systemd service (custom)
     # ------------------------------------------------------------------
     IncidentScenario(
         id="failed-systemd-unit",
@@ -226,13 +226,13 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
     ),
 
     # ------------------------------------------------------------------
-    # P1 — Docker container crash-looping
+    # P1 - Docker container crash-looping
     # ------------------------------------------------------------------
     IncidentScenario(
         id="docker-container-crash",
         severity="P1",
         category="docker",
-        title="Container crash-looping — app unreachable",
+        title="Container crash-looping - app unreachable",
         system_state={
             "setup_commands": [
                 "command -v docker >/dev/null 2>&1 && "
@@ -259,13 +259,13 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
     ),
 
     # ------------------------------------------------------------------
-    # P1 — Network reachability loss
+    # P1 - Network reachability loss
     # ------------------------------------------------------------------
     IncidentScenario(
         id="network-unreachable",
         severity="P1",
         category="network",
-        title="Upstream dependency unreachable — timeouts spiking",
+        title="Upstream dependency unreachable - timeouts spiking",
         system_state={
             "setup_commands": [
                 "mkdir -p /tmp/hermes_net_check",
@@ -489,7 +489,7 @@ if HERMES_AVAILABLE:
 
         # System prompt injected into every rollout
         SYSTEM_PROMPT = textwrap.dedent("""
-            You are Hermes Incident Commander — an autonomous Site Reliability Engineer.
+            You are Hermes Incident Commander - an autonomous Site Reliability Engineer.
 
             When you receive an incident alert, you will:
             1. Immediately gather system diagnostics (CPU, memory, disk, services)
@@ -504,7 +504,7 @@ if HERMES_AVAILABLE:
             for safe operations (reading files, running diagnostics, restarting services).
             Announce severity and progress clearly so operators can follow along.
 
-            Speed matters — every minute of downtime costs money.
+            Speed matters - every minute of downtime costs money.
         """).strip()
 
         def __init__(self, *args, **kwargs):
@@ -589,7 +589,7 @@ if HERMES_AVAILABLE:
                 return scored
 
         async def evaluate(self) -> dict[str, float]:
-            """Periodic evaluation — run all scenarios and report mean MTTR."""
+            """Periodic evaluation - run all scenarios and report mean MTTR."""
             results = []
             for scenario in self._scenarios:
                 async with self.get_tool_context(f"eval-{scenario.id}") as ctx:
@@ -633,13 +633,13 @@ if HERMES_AVAILABLE:
 
 def smoke_test():
     """
-    Quick sanity check — verifies scenario setup commands and reward logic
+    Quick sanity check - verifies scenario setup commands and reward logic
     without running an actual LLM or Atropos server.
     """
     import subprocess
 
     print("=" * 60)
-    print("Hermes Incident Commander — Smoke Test")
+    print("Hermes Incident Commander - Smoke Test")
     print("=" * 60)
 
     for scenario in INCIDENT_SCENARIOS:
@@ -658,7 +658,7 @@ def smoke_test():
             status = "✓" if result.returncode == 0 else "✗"
             print(f"  {status} Syntax: {cmd[:60]}{'...' if len(cmd)>60 else ''}")
 
-    print("\n✅ Smoke test complete — all scenarios validated")
+    print("\n✅ Smoke test complete - all scenarios validated")
 
 
 if __name__ == "__main__":
@@ -673,5 +673,5 @@ if __name__ == "__main__":
         args = parser.parse_args()
         IncidentCommanderEnv.cli_main(args.command, args.config)
     else:
-        print("hermes-agent not installed — running smoke test instead")
+        print("hermes-agent not installed - running smoke test instead")
         smoke_test()
