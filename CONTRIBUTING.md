@@ -1,7 +1,8 @@
 # Contributing to Hermes Incident Commander
 
 Contributions are welcome — new incident scenarios, notifier integrations,
-dashboard improvements, or bug fixes.
+dashboard improvements, or bug fixes. See [ROADMAP.md](ROADMAP.md) for a
+running list of ideas if you're looking for something to work on.
 
 ## Getting set up
 

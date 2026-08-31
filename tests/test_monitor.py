@@ -85,6 +85,101 @@ class TestNotifier:
 
 
 # ---------------------------------------------------------------------------
+# Notifier - PagerDuty
+# ---------------------------------------------------------------------------
+
+class TestPagerDuty:
+
+    def test_not_configured_by_default(self, monkeypatch):
+        monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+        notifier = Notifier()
+        assert notifier.configured is False
+        assert notifier.pagerduty_routing_key is None
+
+    def test_configured_via_env(self, monkeypatch):
+        monkeypatch.setenv("PAGERDUTY_ROUTING_KEY", "R0UTING-KEY")
+        notifier = Notifier()
+        assert notifier.configured is True
+
+    def test_send_pagerduty_event_noop_when_unconfigured(self):
+        notifier = Notifier(pagerduty_routing_key=None)
+        assert notifier.send_pagerduty_event("summary") is None
+
+    def test_resolve_pagerduty_event_noop_when_unconfigured(self):
+        notifier = Notifier(pagerduty_routing_key=None)
+        assert notifier.resolve_pagerduty_event("dedup-1") is None
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_pagerduty_event_posts_trigger(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 202
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        result = notifier.send_pagerduty_event(
+            summary="Disk 95% full", severity="critical", dedup_key="disk-1"
+        )
+
+        assert result is not None
+        assert result.ok is True
+        mock_urlopen.assert_called_once()
+
+        sent_request = mock_urlopen.call_args[0][0]
+        body = json.loads(sent_request.data.decode("utf-8"))
+        assert body["routing_key"] == "R0UTING-KEY"
+        assert body["event_action"] == "trigger"
+        assert body["dedup_key"] == "disk-1"
+        assert body["payload"]["severity"] == "critical"
+        assert body["payload"]["summary"] == "Disk 95% full"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_pagerduty_event_falls_back_to_error_severity(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 202
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        notifier.send_pagerduty_event(summary="x", severity="not-a-real-severity")
+
+        sent_request = mock_urlopen.call_args[0][0]
+        body = json.loads(sent_request.data.decode("utf-8"))
+        assert body["payload"]["severity"] == "error"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_resolve_pagerduty_event_posts_resolve(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 202
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        result = notifier.resolve_pagerduty_event("disk-1")
+
+        assert result is not None
+        assert result.ok is True
+        sent_request = mock_urlopen.call_args[0][0]
+        body = json.loads(sent_request.data.decode("utf-8"))
+        assert body["event_action"] == "resolve"
+        assert body["dedup_key"] == "disk-1"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_alert_triggers_pagerduty_when_configured(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 202
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        results = notifier.send_alert(severity="P0", title_text="disk", detail="Disk full")
+
+        assert len(results) == 1  # only PagerDuty configured, no discord/slack
+        assert results[0].ok is True
+
+    def test_send_alert_skips_pagerduty_when_unconfigured(self):
+        notifier = Notifier(discord_webhook_url=None, slack_webhook_url=None, pagerduty_routing_key=None)
+        results = notifier.send_alert(severity="P1", title_text="cpu", detail="CPU high")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
 # Watchdog — pure logic (no real psutil polling required)
 # ---------------------------------------------------------------------------
 

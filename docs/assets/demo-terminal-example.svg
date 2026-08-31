@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" font-family="'DejaVu Sans Mono','Menlo','Consolas',monospace">
+  <rect width="900" height="560" rx="10" fill="#0d1117"/>
+
+  <!-- title bar -->
+  <rect width="900" height="34" rx="10" fill="#161b22"/>
+  <rect width="900" height="17" y="17" fill="#161b22"/>
+  <circle cx="20" cy="17" r="6" fill="#ff5f56"/>
+  <circle cx="42" cy="17" r="6" fill="#ffbd2e"/>
+  <circle cx="64" cy="17" r="6" fill="#27c93f"/>
+  <text x="450" y="22" fill="#8b949e" font-size="13" text-anchor="middle">python demo/demo_incident.py --scenario disk-full-logs</text>
+
+  <g font-size="13.5">
+    <text x="20" y="64" fill="#e5484d" font-weight="bold">---------------------- [ALERT] Disk 95% full - Log files exploded ----------------------</text>
+
+    <text x="20" y="92" fill="#f2994a" font-weight="bold">Incident Alert</text>
+    <text x="20" y="112" fill="#c9d1d9">ALERT: Disk usage just hit 95% on our application server. Services are failing</text>
+    <text x="20" y="130" fill="#c9d1d9">because they can't write to disk. Find the huge log files and clean them up.</text>
+
+    <text x="20" y="160" fill="#58a6ff">[Turn 1] Hermes thinking...</text>
+    <text x="20" y="180" fill="#e5e7eb">  &gt; terminal</text><text x="110" y="180" fill="#8b949e">df -h &amp;&amp; du -sh /tmp/hermes_demo_logs/*</text>
+    <text x="20" y="198" fill="#7ee787">    /tmp/hermes_demo_logs/app.log.old    30M</text>
+    <text x="20" y="214" fill="#7ee787">    /tmp/hermes_demo_logs/debug.log.old  20M</text>
+    <text x="20" y="230" fill="#8b949e">    [exit_code=0]</text>
+
+    <text x="20" y="258" fill="#58a6ff">[Turn 2] Hermes thinking...</text>
+    <text x="20" y="278" fill="#a5d6ff">Root cause: log rotation was disabled after a deploy 6 days ago -</text>
+    <text x="20" y="296" fill="#a5d6ff">two log files grew unbounded and consumed the free disk space.</text>
+    <text x="20" y="316" fill="#e5e7eb">  &gt; terminal</text><text x="110" y="316" fill="#8b949e">rm /tmp/hermes_demo_logs/*.old</text>
+    <text x="20" y="334" fill="#8b949e">    [exit_code=0]</text>
+
+    <text x="20" y="362" fill="#58a6ff">[Turn 3] Hermes thinking...</text>
+    <text x="20" y="382" fill="#e5e7eb">  &gt; write_file</text><text x="130" y="382" fill="#8b949e">~/.hermes/incidents/2026-08-30-disk-full.md</text>
+    <text x="20" y="398" fill="#e5e7eb">  &gt; write_file</text><text x="130" y="398" fill="#8b949e">~/.hermes/skills/disk-monitor/SKILL.md</text>
+    <text x="20" y="416" fill="#a5d6ff">Disk usage back to 51%. Report and prevention skill written. Resolved.</text>
+
+    <text x="20" y="448" fill="#3fb950" font-weight="bold">------------------------- Incident Resolution Summary -------------------------</text>
+
+    <g fill="#c9d1d9">
+      <text x="20" y="472">Severity        P1</text>
+      <text x="20" y="490">Turns used      3</text>
+      <text x="20" y="508">Tool calls      5</text>
+      <text x="240" y="472">Elapsed time    18.4s</text>
+      <text x="240" y="490">Reports written 1</text>
+      <text x="240" y="508">Skills created  1</text>
+    </g>
+
+    <text x="20" y="536" fill="#3fb950">[OK] Demo complete! Check ~/.hermes/incidents/ and ~/.hermes/skills/</text>
+  </g>
+</svg>

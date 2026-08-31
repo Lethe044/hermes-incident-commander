@@ -3,7 +3,36 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.0.0] — Unreleased
+## [2.1.0] - Unreleased
+
+### Added
+- **Kubernetes pod crash-loop scenario** (`k8s-pod-crashloop`, P1) - new
+  incident scenario in both the RL environment and the standalone demo.
+  Degrades gracefully (like the Docker scenario) when `kubectl` or a
+  cluster isn't available. 8 incident scenarios total.
+- **PagerDuty integration** (`monitor/notifier.py`) - `send_pagerduty_event()`
+  and `resolve_pagerduty_event()` trigger/resolve incidents via PagerDuty's
+  Events API v2, using only stdlib `urllib` (no new dependency). Configured
+  via `PAGERDUTY_ROUTING_KEY`. `send_alert()` and `send_p0_alert()` now fire
+  PagerDuty automatically alongside Discord/Slack when a routing key is set.
+- A real dashboard screenshot (`docs/assets/dashboard-screenshot.png`),
+  generated from `monitor/dashboard.py`'s actual HTML output against sample
+  incident data, and an illustrative demo terminal mockup
+  (`docs/assets/demo-terminal-example.svg`) - both linked from the README.
+- Live GitHub star-history chart embedded in the README.
+- `ROADMAP.md` - a living backlog of ideas for continuous development,
+  separate from the changelog so it doesn't need a release to be updated.
+- 9 new tests in `tests/test_monitor.py` (`TestPagerDuty`) covering trigger,
+  resolve, severity fallback, and `send_alert` integration. 55 tests total.
+
+### Changed
+- `SAFETY.md` and `.env.example` updated to cover `PAGERDUTY_ROUTING_KEY` as
+  a secret with the same handling as webhook URLs.
+- `skills/incident-commander/SKILL.md` - added a Kubernetes diagnostics
+  block and a PagerDuty line to the notification templates and integration
+  points; bumped skill `version` to `1.1`.
+
+## [2.0.0] - Released
 
 ### Added
 - **Standalone Watchdog** (`monitor/watchdog.py`) — continuously monitors

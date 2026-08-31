@@ -10,7 +10,7 @@ description: >
 license: MIT
 metadata:
   author: hermes-incident-commander
-  version: "1.0"
+  version: "1.1"
   tags: [devops, sre, monitoring, incident-response, self-healing]
 ---
 
@@ -85,6 +85,14 @@ journalctl -u <service> -n 100 --no-pager
 docker ps -a
 docker stats --no-stream
 docker logs <container> --tail 100
+```
+
+**Kubernetes pod crash-loop:**
+```bash
+kubectl get pods --field-selector=status.phase!=Running -A
+kubectl describe pod <pod> -n <namespace>
+kubectl logs <pod> -n <namespace> --previous
+kubectl get events -n <namespace> --sort-by=.lastTimestamp | tail -20
 ```
 
 ### 4. REMEDIATE — Self-Healing Actions
@@ -234,10 +242,17 @@ Root cause: <summary>
 MTTR: X min | Full report: ~/.hermes/incidents/<file>
 ```
 
+**PagerDuty:** for P0/P1 incidents, also trigger a PagerDuty event (summary,
+severity, and a dedup key so repeated triggers group into one incident) so
+on-call gets paged through whichever channel they actually watch. The
+standalone watchdog does this automatically via `monitor/notifier.py` when
+`PAGERDUTY_ROUTING_KEY` is set - mirror the same trigger/resolve pattern
+here if you're wiring PagerDuty into a live Hermes gateway.
+
 ## Integration Points
 
 - **Hermes Memory** — incident history, infrastructure topology, known-bad patterns
-- **Hermes Gateway** — real-time Telegram/Discord/Slack alerts  
+- **Hermes Gateway** - real-time Telegram/Discord/Slack/PagerDuty alerts
 - **Hermes Cron** — scheduled health checks, daily briefings
 - **Hermes Subagents** — parallel investigation of multiple services
 - **Hermes Skills** — auto-creates new skills from incident learnings

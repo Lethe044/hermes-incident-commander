@@ -53,11 +53,16 @@ constraints:
   Review your allow-list like you'd review a cron job that runs as root.
 - `clean_log_dirs` deletes files matching `*.log*` older than the configured
   age — point it only at directories that exclusively contain logs.
-- Notifications (Discord/Slack webhooks) include metrics and root-cause text
-  in plaintext. Don't put secrets in your incident descriptions.
-- API keys and webhook URLs should be set via environment variables
-  (`ANTHROPIC_API_KEY`, `DISCORD_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`) — never
-  commit them. See `.env.example`.
+- Notifications (Discord/Slack webhooks, PagerDuty events) include metrics
+  and root-cause text in plaintext/custom_details. Don't put secrets in your
+  incident descriptions.
+- API keys, webhook URLs, and the PagerDuty routing key should be set via
+  environment variables (`ANTHROPIC_API_KEY`, `DISCORD_WEBHOOK_URL`,
+  `SLACK_WEBHOOK_URL`, `PAGERDUTY_ROUTING_KEY`) - never commit them. See
+  `.env.example`.
+- A PagerDuty routing key only lets `monitor/notifier.py` trigger/resolve
+  events on the single service it's bound to via PagerDuty's Events API v2 -
+  it cannot read or modify anything else in your PagerDuty account.
 
 ## Reporting a security issue
 

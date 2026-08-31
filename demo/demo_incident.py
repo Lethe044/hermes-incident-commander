@@ -249,6 +249,32 @@ DEMO_SCENARIOS = {
             "~/.hermes/incidents/."
         ),
     },
+    "k8s-pod-crashloop": {
+        "title": "🚨 Pod stuck in CrashLoopBackOff - deployment unhealthy",
+        "severity": "P1",
+        "setup": [
+            "command -v kubectl >/dev/null 2>&1 && "
+            "kubectl run hermes-demo-crashloop --image=busybox --restart=Always "
+            "-- sh -c 'exit 1' >/dev/null 2>&1 || true",
+            "echo 'K8S_INCIDENT_ACTIVE=1' > /tmp/hermes_incident_marker",
+        ],
+        "cleanup": [
+            "command -v kubectl >/dev/null 2>&1 && "
+            "kubectl delete pod hermes-demo-crashloop --ignore-not-found "
+            ">/dev/null 2>&1 || true",
+            "rm -f /tmp/hermes_incident_marker",
+        ],
+        "prompt": (
+            "ALERT: The 'hermes-demo-crashloop' pod is stuck in CrashLoopBackOff and "
+            "the deployment behind it is unreachable. If kubectl and a cluster are "
+            "available, inspect the pod status, recent events, and container logs "
+            "(kubectl describe pod, kubectl logs --previous). If kubectl or a cluster "
+            "is not available, note that in your diagnosis and explain what you would "
+            "check. Determine why it keeps crashing, apply a fix or safely recreate "
+            "the pod, verify it stabilizes, and write a post-incident report to "
+            "~/.hermes/incidents/."
+        ),
+    },
 }
 
 

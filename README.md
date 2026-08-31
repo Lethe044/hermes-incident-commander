@@ -16,19 +16,23 @@ no Hermes installation required.
 
 ## What's New
 
+- 📟 **PagerDuty integration** - the notifier can now trigger (and resolve)
+  PagerDuty incidents via the Events API v2, alongside Discord/Slack, with
+  zero new dependencies. See [Standalone Mode](#standalone-mode-no-hermes-required).
+- ☸️ **Kubernetes pod crash-loop scenario** - an 8th incident scenario
+  (`k8s-pod-crashloop`), in both the RL environment and the demo.
 - 🛰️ **Standalone Watchdog** — monitor a real host's CPU/memory/disk and failed
   systemd units, get Claude-powered triage, and (opt-in) safe auto-remediation.
-  No Hermes install needed. See [Standalone Mode](#standalone-mode-no-hermes-required).
+  No Hermes install needed.
 - 📊 **Offline HTML Dashboard** — a single, dependency-free file summarizing your
-  incident history. No server, no CDN, works offline.
-- 📣 **Discord / Slack Notifier** — zero-dependency webhook alerts.
-- 🧩 **2 new incident scenarios** — Docker crash-looping, network unreachability.
+  incident history. No server, no CDN, works offline. [See a screenshot.](#standalone-mode-no-hermes-required)
 - ✅ **CI on every push** — the test suite and smoke test run automatically via
   GitHub Actions across Python 3.10–3.12.
 - 🔒 **SAFETY.md** — a written threat model for the difference between demo mode
   (full shell access, sandbox only) and the watchdog's allow-listed remediation.
+- 🗺️ **ROADMAP.md** - a living backlog for where this project goes next.
 
-Full history in [CHANGELOG.md](CHANGELOG.md).
+Full history in [CHANGELOG.md](CHANGELOG.md) · what's coming in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -75,6 +79,13 @@ python demo/demo_incident.py --scenario cpu-runaway-process
 - Writes a structured post-incident report to `~/.hermes/incidents/`
 - Creates a **new prevention skill** in `~/.hermes/skills/` so it handles this faster next time
 
+<p align="center">
+  <img src="docs/assets/demo-terminal-example.svg" alt="Illustrative example of demo_incident.py output" width="700">
+</p>
+
+<p align="center"><sub>Illustrative example of what a run looks like - hand-assembled from real transcript
+shapes, not a captured live session (turn count, timings, and exact tool calls will vary run to run).</sub></p>
+
 > ⚠️ The demo and the RL training environment give the model **full terminal
 > access**. Only run them in a disposable sandbox/VM/container — see
 > [SAFETY.md](SAFETY.md).
@@ -91,9 +102,10 @@ and needs nothing but `ANTHROPIC_API_KEY`:
 pip install -e .              # or: pip install -r requirements.txt psutil
 
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional, for real-time alerts:
+# optional, for real-time alerts (any subset — all three can be set at once):
 export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+export PAGERDUTY_ROUTING_KEY=...
 
 # Single check — good for testing or a cron job
 python -m monitor.watchdog --once
@@ -111,6 +123,10 @@ Claude, and any remediation is restricted to an explicit allow-list you
 configure (restart *this specific* service, clean *this specific* log
 directory). Full threat model in [SAFETY.md](SAFETY.md).
 
+`monitor/notifier.py` fans an alert out to every channel you've configured —
+Discord, Slack, and/or PagerDuty (via the Events API v2) - so it's safe to
+set all three; nothing extra fires for channels you leave unconfigured.
+
 Once you have some incident history, generate a dashboard:
 
 ```bash
@@ -120,6 +136,12 @@ python -m monitor.dashboard --open
 This writes a single, self-contained HTML file (no server, no external
 requests) summarizing incident counts by severity, auto-remediation rate, and
 a recent-incidents table.
+
+<p align="center">
+  <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data" width="700">
+</p>
+
+<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history, not a mockup.</sub></p>
 
 ---
 
@@ -132,7 +154,7 @@ This project was designed to push every capability of Hermes Agent:
 | **Persistent Memory** | Builds a system topology map over time. Learns which services fail together, time-of-day patterns, and which remediations work on YOUR infrastructure. |
 | **Skill Auto-Creation** | After every novel incident, writes a new `SKILL.md` prevention playbook. Hermes gets measurably better at your stack over weeks. |
 | **Cron Scheduler** | Every 5 min: critical health check. Every hour: full audit. Daily 08:00: morning briefing to Telegram. |
-| **Gateway (Telegram/Discord)** | Real-time P0 alerts, resolution notices, and daily briefings delivered to your phone. |
+| **Gateway (Telegram/Discord/PagerDuty)** | Real-time P0 alerts, resolution notices, and daily briefings delivered to your phone or on-call rotation. |
 | **Subagent Spawning** | For multi-service environments, spawns parallel subagents to investigate nginx, database, and application layers simultaneously. |
 | **Session Search (FTS5)** | "Have we seen this error before?" - searches past incidents for matching patterns. |
 | **execute_code** | Collapses multi-step diagnostic pipelines into single inference turns, dramatically reducing latency. |
@@ -195,19 +217,20 @@ graph LR
 
     SKILLS --> SKILL_MD["📄 incident-commander/SKILL.md<br/>← install into ~/.hermes/skills/"]
 
-    ENVS --> ENV_PY["🐍 incident_env.py<br/>← Atropos RL environment, 7 scenarios"]
+    ENVS --> ENV_PY["🐍 incident_env.py<br/>← Atropos RL environment, 8 scenarios"]
     ENVS --> ENV_CFG["⚙️ incident_config.yaml<br/>← training configuration"]
 
     DEMO --> DEMO_PY["🐍 demo_incident.py<br/>← standalone sandboxed demo"]
 
     MON --> WATCHDOG["🐍 watchdog.py<br/>← real-host monitor, no Hermes needed"]
-    MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack webhooks"]
+    MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack / PagerDuty"]
     MON --> DASH["🐍 dashboard.py<br/>← offline HTML dashboard"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 46 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 55 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
+    DOCS --> ASSETS["🖼️ assets/<br/>← dashboard screenshot, demo mockup"]
 
     CI --> CIWORKFLOW["⚙️ ci.yml<br/>← tests + smoke test on every push"]
 
@@ -300,6 +323,7 @@ pie title Reward Components
 | `disk-full-logs` | P1 | disk | 95% disk usage from exploded log files |
 | `memory-leak-process` | P1 | memory | Mystery process eating 150MB+ |
 | `docker-container-crash` | P1 | docker | Container stuck in a restart/crash loop |
+| `k8s-pod-crashloop` | P1 | kubernetes | Pod stuck in CrashLoopBackOff |
 | `network-unreachable` | P1 | network | Upstream dependency unreachable, timeouts spiking |
 | `cpu-runaway-process` | P2 | cpu | 95% CPU from runaway computation |
 | `failed-systemd-unit` | P2 | service | Custom worker service in failed state |
@@ -315,8 +339,8 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (46 tests: scenarios, reward function, skill file,
-# demo script, notifier, watchdog, dashboard)
+# Run full test suite (55 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. PagerDuty, watchdog, dashboard)
 pytest tests/ -v
 
 # Run specific test classes
@@ -343,15 +367,26 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all — just `ANTHROPIC_API_KEY` — and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 46 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 55 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
+
+## Star History
+
+<a href="https://star-history.com/#Lethe044/hermes-incident-commander&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Lethe044/hermes-incident-commander&type=Date&theme=dark" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Lethe044/hermes-incident-commander&type=Date" />
+  </picture>
+</a>
 
 ## Contributing
 
 New incident scenarios, notifier integrations, and dashboard improvements are
 welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up and
-what a good PR looks like.
+what a good PR looks like, and [ROADMAP.md](ROADMAP.md) if you want ideas.
+This project is meant to keep growing — if you use it and hit a rough edge,
+please open an issue even if you don't have time to fix it yourself.
 
 ## Safety
 

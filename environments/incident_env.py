@@ -289,6 +289,42 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
             you've confirmed a working path (or documented the confirmed root cause).
         """).strip(),
     ),
+
+    # ------------------------------------------------------------------
+    # P1 - Kubernetes pod crash-loop
+    # ------------------------------------------------------------------
+    IncidentScenario(
+        id="k8s-pod-crashloop",
+        severity="P1",
+        category="kubernetes",
+        title="Pod stuck in CrashLoopBackOff - deployment unhealthy",
+        system_state={
+            "setup_commands": [
+                "command -v kubectl >/dev/null 2>&1 && "
+                "kubectl run hermes-demo-crashloop --image=busybox --restart=Always "
+                "-- sh -c 'exit 1' >/dev/null 2>&1 || true",
+                "echo 'K8S_INCIDENT_ACTIVE' > /tmp/incident_marker",
+            ]
+        },
+        success_criteria=[
+            "test -f /tmp/incident_marker && "
+            "(! command -v kubectl >/dev/null 2>&1 || "
+            "! kubectl get pod hermes-demo-crashloop "
+            "-o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' "
+            "2>/dev/null | grep -q CrashLoopBackOff || "
+            "! kubectl get pod hermes-demo-crashloop >/dev/null 2>&1)",
+        ],
+        partial_criteria=[
+            "test -f /tmp/incident_marker",
+        ],
+        description=textwrap.dedent("""
+            ALERT: The 'hermes-demo-crashloop' pod is stuck in CrashLoopBackOff and the
+            deployment behind it is unhealthy. Inspect the pod's status, recent events,
+            and container logs (kubectl describe pod, kubectl logs --previous), determine
+            why it keeps crashing, apply a fix (or safely delete/recreate the pod or
+            deployment), verify it stabilizes, and write up the root cause.
+        """).strip(),
+    ),
 ]
 
 
