@@ -325,6 +325,87 @@ INCIDENT_SCENARIOS: list[IncidentScenario] = [
             deployment), verify it stabilizes, and write up the root cause.
         """).strip(),
     ),
+
+    # ------------------------------------------------------------------
+    # P1 - ECS task deploy/rollback loop
+    # ------------------------------------------------------------------
+    IncidentScenario(
+        id="ecs-task-crashloop",
+        severity="P1",
+        category="ecs",
+        title="ECS task stuck in a deploy/rollback loop",
+        system_state={
+            "setup_commands": [
+                "mkdir -p /tmp/hermes_ecs_service",
+                "python3 -c \"import json; json.dump({'lastStatus': 'STOPPED', "
+                "'desiredStatus': 'RUNNING', 'stoppedReason': "
+                "'CannotStartContainerError: failed to start container: bad entrypoint "
+                "override in latest task definition revision'}, "
+                "open('/tmp/hermes_ecs_service/task_state.json', 'w'))\"",
+                "echo 'ECS_INCIDENT_ACTIVE' > /tmp/incident_marker",
+            ]
+        },
+        success_criteria=[
+            "test -f /tmp/incident_marker && "
+            "python3 -c \"import json; d = json.load(open("
+            "'/tmp/hermes_ecs_service/task_state.json')); "
+            "exit(0 if d.get('lastStatus') == 'RUNNING' else 1)\"",
+        ],
+        partial_criteria=[
+            "test -f /tmp/incident_marker",
+        ],
+        description=textwrap.dedent("""
+            ALERT: The ECS service behind our API is stuck in a deploy/rollback loop.
+            Every new task immediately stops with a CannotStartContainerError. Inspect
+            /tmp/hermes_ecs_service/task_state.json (standing in for `aws ecs describe-tasks`
+            output), determine the root cause from stoppedReason, apply a fix (correct the
+            bad entrypoint override and redeploy - i.e. update the JSON so lastStatus is
+            "RUNNING"), and write up what happened.
+        """).strip(),
+    ),
+
+    # ------------------------------------------------------------------
+    # P2 - Lambda cold-start/timeout spike
+    # ------------------------------------------------------------------
+    IncidentScenario(
+        id="lambda-timeout-spike",
+        severity="P2",
+        category="lambda",
+        title="Lambda function timing out on cold starts",
+        system_state={
+            "setup_commands": [
+                "mkdir -p /tmp/hermes_lambda_fn",
+                "python3 -c \"import json; json.dump({'timeout_seconds': 3, "
+                "'memory_mb': 128, 'reserved_concurrency': 0}, "
+                "open('/tmp/hermes_lambda_fn/config.json', 'w'))\"",
+                "python3 -c \"open('/tmp/hermes_lambda_fn/recent_invocations.log', 'w')"
+                ".write('REPORT Init Duration: 4200.00 ms\\n"
+                "Task timed out after 3.00 seconds\\n"
+                "Task timed out after 3.00 seconds\\n"
+                "Task timed out after 3.00 seconds\\n')\"",
+                "echo 'LAMBDA_INCIDENT_ACTIVE' > /tmp/incident_marker",
+            ]
+        },
+        success_criteria=[
+            "test -f /tmp/incident_marker && "
+            "python3 -c \"import json; d = json.load(open("
+            "'/tmp/hermes_lambda_fn/config.json')); "
+            "exit(0 if d.get('timeout_seconds', 0) >= 10 else 1)\"",
+        ],
+        partial_criteria=[
+            "test -f /tmp/incident_marker",
+        ],
+        description=textwrap.dedent("""
+            ALERT: A Lambda function is timing out on a growing share of invocations.
+            Inspect /tmp/hermes_lambda_fn/config.json and
+            /tmp/hermes_lambda_fn/recent_invocations.log (standing in for CloudWatch
+            Logs). The init (cold start) duration alone is close to 4.2 seconds, but the
+            function's timeout is set to only 3 seconds, so every cold invocation fails
+            before it can finish. Raise timeout_seconds to at least 10 in config.json
+            (and note in your report whether reserved_concurrency or memory should also
+            change to reduce cold starts), then write up the root cause.
+        """).strip(),
+    ),
 ]
 
 

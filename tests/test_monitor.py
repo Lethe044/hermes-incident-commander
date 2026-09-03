@@ -517,3 +517,172 @@ class TestDashboard:
         svg = bar_svg(Counter())
         assert "<svg" in svg
         assert "P0" in svg and "P1" in svg and "P2" in svg and "P3" in svg
+
+
+# ---------------------------------------------------------------------------
+# Incident search (SQLite + FTS5, with LIKE fallback)
+# ---------------------------------------------------------------------------
+
+class TestIncidentDB:
+
+    def _make_history(self, tmp_path):
+        history = tmp_path / "history.jsonl"
+        history.write_text(
+            '{"timestamp": "t1", "severity": "P0", "category": "service", '
+            '"root_cause": "nginx worker processes exited after a bad config reload", '
+            '"auto_remediated": true, "report_file": "r1.md"}\n'
+            '{"timestamp": "t2", "severity": "P1", "category": "disk", '
+            '"root_cause": "Log rotation was disabled, disk filled up", '
+            '"auto_remediated": true, "report_file": "r2.md"}\n'
+        )
+        return history
+
+    def _patch_paths(self, monkeypatch, tmp_path):
+        import monitor.incident_db as idb
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", self._make_history(tmp_path))
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        return idb
+
+    def test_sync_reads_history_and_search_finds_match(self, tmp_path, monkeypatch):
+        idb = self._patch_paths(monkeypatch, tmp_path)
+        conn = idb.get_connection()
+        n = idb.sync(conn)
+        assert n == 2
+
+        results = idb.search("nginx", conn=conn)
+        assert len(results) == 1
+        assert results[0]["report_file"] == "r1.md"
+
+        results = idb.search("rotation", conn=conn)
+        assert len(results) == 1
+        assert results[0]["report_file"] == "r2.md"
+
+    def test_search_no_match_returns_empty_list(self, tmp_path, monkeypatch):
+        idb = self._patch_paths(monkeypatch, tmp_path)
+        conn = idb.get_connection()
+        idb.sync(conn)
+        assert idb.search("totally-unrelated-xyz", conn=conn) == []
+
+    def test_sync_is_idempotent(self, tmp_path, monkeypatch):
+        idb = self._patch_paths(monkeypatch, tmp_path)
+        conn = idb.get_connection()
+        idb.sync(conn)
+        idb.sync(conn)  # re-run against the same, unchanged history
+        count = conn.execute("SELECT COUNT(*) FROM incidents").fetchone()[0]
+        assert count == 2  # not 4 - upserted by report_file, not duplicated
+
+    def test_sync_missing_history_file_returns_zero(self, tmp_path, monkeypatch):
+        import monitor.incident_db as idb
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "does_not_exist.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        assert idb.sync() == 0
+
+    def test_fts_query_escapes_punctuation_safely(self):
+        import monitor.incident_db as idb
+        # Hyphens/colons in real incident text (e.g. "CannotStartContainerError:")
+        # must not raise an FTS5 syntax error.
+        query = idb._fts_query("nginx-worker: crashed")
+        assert query.count('"') >= 4  # each term individually phrase-quoted
+
+    def test_like_fallback_when_fts5_unavailable(self, tmp_path, monkeypatch):
+        import sqlite3
+        import monitor.incident_db as idb
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(idb._BASE_SCHEMA)  # no FTS schema on purpose
+        conn.execute(
+            "INSERT INTO incidents (timestamp, severity, category, root_cause, "
+            "report_file, auto_remediated, report_body) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t1", "P1", "disk", "Log rotation was disabled", "r1.md", 0, ""),
+        )
+        conn.commit()
+
+        assert idb._fts_available(conn) is False
+        results = idb.search("rotation", conn=conn)
+        assert len(results) == 1
+        assert results[0]["report_file"] == "r1.md"
+
+
+# ---------------------------------------------------------------------------
+# Time-of-day-aware baseline (adaptive thresholds)
+# ---------------------------------------------------------------------------
+
+class TestBaseline:
+
+    def test_insufficient_samples_falls_back_to_static(self, tmp_path):
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        t = baseline.get_adaptive_threshold("cpu", 2, static_threshold=90.0, path=path)
+        assert t == 90.0
+
+    def test_hour_with_no_data_uses_static(self, tmp_path):
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        for _ in range(50):
+            baseline.update_baseline({"cpu": 70.0}, hour=2, path=path)
+        # different hour, never updated
+        t = baseline.get_adaptive_threshold("cpu", 14, static_threshold=90.0, path=path)
+        assert t == 90.0
+
+    def test_adaptive_threshold_never_drops_below_static(self, tmp_path):
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        for _ in range(50):
+            baseline.update_baseline({"cpu": 5.0}, hour=3, path=path)  # a very quiet hour
+        t = baseline.get_adaptive_threshold("cpu", 3, static_threshold=90.0, path=path)
+        assert t >= 90.0
+
+    def test_adaptive_threshold_can_rise_above_static_when_justified(self, tmp_path):
+        import random
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        random.seed(1)
+        for _ in range(50):
+            baseline.update_baseline({"cpu": 88.0 + random.uniform(-2, 2)}, hour=2, path=path)
+        t = baseline.get_adaptive_threshold("cpu", 2, static_threshold=90.0, path=path)
+        assert t > 90.0
+
+    def test_adaptive_threshold_is_capped(self, tmp_path):
+        import random
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        random.seed(2)
+        for _ in range(50):
+            baseline.update_baseline({"cpu": random.uniform(0, 100)}, hour=5, path=path)
+        t = baseline.get_adaptive_threshold("cpu", 5, static_threshold=90.0, cap_multiplier=1.5, path=path)
+        assert t <= 90.0 * 1.5
+
+    def test_hour_summary_marks_trust_correctly(self, tmp_path):
+        from monitor import baseline
+        path = tmp_path / "baseline.json"
+        for _ in range(5):  # below MIN_SAMPLES_PER_HOUR
+            baseline.update_baseline({"cpu": 50.0}, hour=9, path=path)
+        summary = baseline.hour_summary(path=path)
+        assert summary["cpu"]["9"]["trusted"] is False
+        assert summary["cpu"]["9"]["n"] == 5
+
+    def test_breaches_uses_static_thresholds_when_adaptive_disabled(self, tmp_path, monkeypatch):
+        import monitor.baseline as baseline_mod
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+
+        cfg = WatchdogConfig(cpu_threshold=90.0, adaptive_thresholds=False)
+        metrics = Metrics(timestamp="2026-01-01T02:00:00+00:00", cpu_percent=90.5,
+                           mem_percent=10, disk_percent=10, failed_services=[])
+        assert metrics.breaches(cfg)["cpu"] is True
+
+    def test_breaches_uses_adaptive_threshold_when_enabled(self, tmp_path, monkeypatch):
+        import random
+        import monitor.baseline as baseline_mod
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+
+        random.seed(3)
+        for _ in range(50):
+            baseline_mod.update_baseline({"cpu": 88.0 + random.uniform(-2, 2), "mem": 10, "disk": 10}, hour=2)
+
+        cfg = WatchdogConfig(cpu_threshold=90.0, adaptive_thresholds=True)
+        metrics = Metrics(timestamp="2026-01-01T02:00:00+00:00", cpu_percent=90.5,
+                           mem_percent=10, disk_percent=10, failed_services=[])
+        # learned baseline for this hour justifies a threshold above 90.5
+        assert metrics.breaches(cfg)["cpu"] is False

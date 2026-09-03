@@ -15,22 +15,24 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
   SSH instead of one process per host. Needs careful thought before it
   touches `SAFETY.md`'s threat model - remote command execution changes the
   risk profile even if remediation stays allow-listed.
-- **SQLite + full-text search over incident history** - replace/augment
-  `history.jsonl` with a small SQLite database so "have we seen this
-  before?" queries (mentioned in the Hermes-integrated `SKILL.md`) work for
-  the standalone watchdog too, without a Hermes install.
-- **Time-of-day-aware thresholds** - instead of one static
-  `cpu_threshold`, learn a simple per-hour baseline from recent history so
-  "95% CPU" doesn't page you for a nightly batch job that's always been
-  fine.
 - **One-command install scripts** - a `curl | bash`-style installer (or
   Ansible role) that sets up the watchdog as a systemd service, on a couple
   of common targets (Ubuntu/Debian on a plain VM, DigitalOcean, Hetzner).
-- **More cloud-native scenarios** - e.g. an ECS task stuck in a
-  deploy/rollback loop, or a Lambda cold-start/timeout spike - to round out
-  `kubernetes`/`docker` with a couple of managed-platform equivalents.
-- **Grafana dashboard JSON** to go with the new `/metrics` endpoint, so
-  `--metrics-port` users don't have to build their own panels from scratch.
+- **Search box in the offline dashboard** - `monitor/dashboard.py` already
+  renders a recent-incidents table; wire a small client-side filter (or a
+  link that shells out to `monitor/incident_db.py --search`) so you don't
+  need a separate terminal to answer "have we seen this before?".
+- **Notifier delivery retry/backoff** - Discord/Slack/PagerDuty calls in
+  `monitor/notifier.py` currently fire once; a transient network blip during
+  a real incident shouldn't mean the page never goes out. A couple of
+  retries with backoff, still stdlib-only.
+- **Auto-tune `consecutive_breaches_required`** - if the watchdog is
+  auto-remediating the same category over and over with no real incident
+  (flapping), that's a signal the sensitivity is off; surface it instead of
+  silently keeping the noisy default.
+- **Slash-command / webhook query into `incident_db.py`** - let a Slack or
+  Discord bot answer "have we seen X before?" by querying the SQLite index
+  directly, instead of requiring shell access to the host.
 
 ## Explicitly out of scope (for now)
 

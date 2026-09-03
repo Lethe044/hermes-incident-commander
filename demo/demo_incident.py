@@ -275,6 +275,62 @@ DEMO_SCENARIOS = {
             "~/.hermes/incidents/."
         ),
     },
+    "ecs-task-crashloop": {
+        "title": "🚨 ECS task stuck in a deploy/rollback loop",
+        "severity": "P1",
+        "setup": [
+            "mkdir -p /tmp/hermes_ecs_service",
+            "python3 -c \"import json; json.dump({'lastStatus': 'STOPPED', "
+            "'desiredStatus': 'RUNNING', 'stoppedReason': "
+            "'CannotStartContainerError: failed to start container: bad entrypoint "
+            "override in latest task definition revision'}, "
+            "open('/tmp/hermes_ecs_service/task_state.json', 'w'))\"",
+            "echo 'ECS_INCIDENT_ACTIVE=1' > /tmp/hermes_incident_marker",
+        ],
+        "cleanup": [
+            "rm -rf /tmp/hermes_ecs_service",
+            "rm -f /tmp/hermes_incident_marker",
+        ],
+        "prompt": (
+            "ALERT: The ECS service behind our API is stuck in a deploy/rollback loop. "
+            "Every new task immediately stops with a CannotStartContainerError. Inspect "
+            "/tmp/hermes_ecs_service/task_state.json (standing in for `aws ecs "
+            "describe-tasks` output), determine the root cause from stoppedReason, "
+            "apply a fix (update the JSON so lastStatus is \"RUNNING\", as if you'd "
+            "corrected the entrypoint and redeployed), and write a post-incident "
+            "report to ~/.hermes/incidents/."
+        ),
+    },
+    "lambda-timeout-spike": {
+        "title": "🚨 Lambda function timing out on cold starts",
+        "severity": "P2",
+        "setup": [
+            "mkdir -p /tmp/hermes_lambda_fn",
+            "python3 -c \"import json; json.dump({'timeout_seconds': 3, "
+            "'memory_mb': 128, 'reserved_concurrency': 0}, "
+            "open('/tmp/hermes_lambda_fn/config.json', 'w'))\"",
+            "python3 -c \"open('/tmp/hermes_lambda_fn/recent_invocations.log', 'w')"
+            ".write('REPORT Init Duration: 4200.00 ms\\n"
+            "Task timed out after 3.00 seconds\\n"
+            "Task timed out after 3.00 seconds\\n"
+            "Task timed out after 3.00 seconds\\n')\"",
+            "echo 'LAMBDA_INCIDENT_ACTIVE=1' > /tmp/hermes_incident_marker",
+        ],
+        "cleanup": [
+            "rm -rf /tmp/hermes_lambda_fn",
+            "rm -f /tmp/hermes_incident_marker",
+        ],
+        "prompt": (
+            "ALERT: A Lambda function is timing out on a growing share of invocations. "
+            "Inspect /tmp/hermes_lambda_fn/config.json and "
+            "/tmp/hermes_lambda_fn/recent_invocations.log (standing in for CloudWatch "
+            "Logs). The init (cold start) duration alone is close to 4.2 seconds, but "
+            "the function's timeout is only 3 seconds, so every cold invocation fails "
+            "before it can finish. Raise timeout_seconds to at least 10 in "
+            "config.json, note whether reserved_concurrency or memory should also "
+            "change, and write a post-incident report to ~/.hermes/incidents/."
+        ),
+    },
 }
 
 

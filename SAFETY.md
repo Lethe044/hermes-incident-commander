@@ -69,6 +69,12 @@ constraints:
   anything else on the host. If you need a remote Prometheus server to
   scrape it, put it behind your own reverse proxy or firewall rule rather
   than binding it to `0.0.0.0`.
+- `monitor/incident_db.py`'s SQLite database (`~/.hermes/incidents/incidents.db`)
+  and `monitor/baseline.py`'s learned baseline
+  (`~/.hermes/incidents/baseline.json`) are plain local files with the same
+  sensitivity as `history.jsonl` itself - incident root-cause text, not
+  secrets. Neither module opens a network port or executes anything; both
+  only ever read/write files under `~/.hermes/incidents/`.
 
 ## Reporting a security issue
 

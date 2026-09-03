@@ -88,6 +88,7 @@ class WatchdogConfig:
         "max_log_age_days": 14,
     })
     auto_remediate: bool = False
+    adaptive_thresholds: bool = False
     model: str = DEFAULT_MODEL
 
     @classmethod
@@ -116,10 +117,26 @@ class Metrics:
     failed_services: list[str]
 
     def breaches(self, cfg: WatchdogConfig) -> dict[str, bool]:
+        cpu_threshold = cfg.cpu_threshold
+        mem_threshold = cfg.mem_threshold
+        disk_threshold = cfg.disk_threshold
+
+        if cfg.adaptive_thresholds:
+            # Never let a baseline/parsing problem break breach detection -
+            # worst case, we silently fall back to the static thresholds.
+            try:
+                from monitor import baseline
+                hour = datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")).hour
+                cpu_threshold = baseline.get_adaptive_threshold("cpu", hour, cfg.cpu_threshold)
+                mem_threshold = baseline.get_adaptive_threshold("mem", hour, cfg.mem_threshold)
+                disk_threshold = baseline.get_adaptive_threshold("disk", hour, cfg.disk_threshold)
+            except Exception:
+                pass
+
         return {
-            "cpu": self.cpu_percent >= cfg.cpu_threshold,
-            "mem": self.mem_percent >= cfg.mem_threshold,
-            "disk": self.disk_percent >= cfg.disk_threshold,
+            "cpu": self.cpu_percent >= cpu_threshold,
+            "mem": self.mem_percent >= mem_threshold,
+            "disk": self.disk_percent >= disk_threshold,
             "service": bool(self.failed_services),
         }
 
@@ -152,6 +169,23 @@ def collect_metrics(cfg: WatchdogConfig) -> Metrics:
         disk_percent=disk,
         failed_services=failed,
     )
+
+
+def _maybe_update_baseline(cfg: WatchdogConfig, metrics: Metrics) -> None:
+    """Feeds this poll's sample into monitor/baseline.py's per-hour running
+    stats, if `adaptive_thresholds` is enabled. Never lets a baseline
+    problem interrupt monitoring."""
+    if not cfg.adaptive_thresholds:
+        return
+    try:
+        from monitor import baseline
+        hour = datetime.fromisoformat(metrics.timestamp.replace("Z", "+00:00")).hour
+        baseline.update_baseline(
+            {"cpu": metrics.cpu_percent, "mem": metrics.mem_percent, "disk": metrics.disk_percent},
+            hour,
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +406,15 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
             "report_file": str(report_path.name),
         }) + "\n")
 
+    # Best-effort: keep the local search index (monitor/incident_db.py) in
+    # sync so "have we seen this before?" works without a separate cron job.
+    # Never let a search-index problem take down the watchdog itself.
+    try:
+        from monitor import incident_db
+        incident_db.sync()
+    except Exception:
+        pass
+
     return report_path
 
 
@@ -385,6 +428,7 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     breaches = metrics.breaches(cfg)
     breached_any = any(breaches.values())
     update_latest_metrics(metrics, breaches)
+    _maybe_update_baseline(cfg, metrics)
 
     open_incidents = _resolve_recovered_breaches(breaches, notifier, quiet=quiet)
 
@@ -445,6 +489,7 @@ def watch_forever(cfg: WatchdogConfig, notifier: Notifier, max_iterations: int |
         metrics = collect_metrics(cfg)
         breaches = metrics.breaches(cfg)
         update_latest_metrics(metrics, breaches)
+        _maybe_update_baseline(cfg, metrics)
 
         print(
             f"[{metrics.timestamp}] cpu={metrics.cpu_percent:.1f}% "
@@ -513,6 +558,16 @@ def main() -> None:
         "--metrics-port", type=int, default=None,
         help="Serve Prometheus-format metrics on this port at /metrics (binds 127.0.0.1)",
     )
+    parser.add_argument(
+        "--adaptive-thresholds", action="store_true",
+        help="Learn a per-hour-of-day baseline and raise thresholds during normally-busy "
+             "hours instead of using one static threshold all day (can only raise the bar, "
+             "never lower it below your configured threshold; see monitor/baseline.py).",
+    )
+    parser.add_argument(
+        "--show-baseline", action="store_true",
+        help="Print the learned per-hour-of-day baseline (cpu/mem/disk) and exit",
+    )
     parser.add_argument("--cpu-threshold", type=float, default=None)
     parser.add_argument("--mem-threshold", type=float, default=None)
     parser.add_argument("--disk-threshold", type=float, default=None)
@@ -521,9 +576,23 @@ def main() -> None:
     parser.add_argument("--no-notify", action="store_true", help="Disable Discord/Slack notifications")
     args = parser.parse_args()
 
+    if args.show_baseline:
+        from monitor import baseline
+        summary = baseline.hour_summary()
+        if not summary:
+            print("No baseline data yet. Run with --adaptive-thresholds to start collecting it.")
+        for metric, hours in summary.items():
+            print(f"{metric}:")
+            for hour_key, stats in hours.items():
+                trust = "trusted" if stats["trusted"] else "not enough data yet"
+                print(f"  {int(hour_key):02d}:00  n={stats['n']:<4} mean={stats['mean']:<6} stddev={stats['stddev']:<6} ({trust})")
+        return
+
     cfg = WatchdogConfig.from_file(args.config) if args.config else WatchdogConfig()
     if args.auto_remediate:
         cfg.auto_remediate = True
+    if args.adaptive_thresholds:
+        cfg.adaptive_thresholds = True
     if args.cpu_threshold is not None:
         cfg.cpu_threshold = args.cpu_threshold
     if args.mem_threshold is not None:

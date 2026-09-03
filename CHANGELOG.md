@@ -3,7 +3,37 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.1.0] - Unreleased
+## [2.2.0] - Unreleased
+
+### Added
+- **2 more cloud-native incident scenarios**: `ecs-task-crashloop` (P1) and
+  `lambda-timeout-spike` (P2). Fully self-contained (local JSON/log files
+  standing in for `aws ecs describe-tasks` / CloudWatch Logs output) so
+  they run the same in CI as on a laptop - no AWS credentials needed.
+  10 incident scenarios total.
+- **`monitor/incident_db.py`** - local incident search over
+  `history.jsonl` and its linked `.md` reports, using SQLite (stdlib only,
+  no new dependency). Uses FTS5 full-text search when available, and
+  degrades automatically to a `LIKE`-based scan on SQLite builds without
+  FTS5. `write_incident()` now keeps the index in sync automatically after
+  every incident; `python -m monitor.incident_db --sync`/`--search` are
+  there for manual use or a cron job.
+- **`monitor/baseline.py` + `WatchdogConfig.adaptive_thresholds`** -
+  opt-in, time-of-day-aware thresholds. Learns a running per-hour mean/
+  stddev (Welford's algorithm) from the watchdog's own polls and can raise
+  the effective threshold above your configured static one during
+  historically busy hours - but never lower it, and never above
+  `static_threshold * 1.5`, so an ongoing real incident can't train the
+  watchdog into ignoring itself. `--adaptive-thresholds` to opt in,
+  `--show-baseline` to inspect what's been learned per hour.
+- **Grafana dashboard JSON** (`docs/assets/grafana-dashboard.json`) - a
+  ready-to-import dashboard (CPU/mem/disk gauges, failed-services stat, a
+  timeseries panel, and a breach-status timeline) for the Prometheus
+  `/metrics` endpoint added in 2.1.0.
+- 14 new tests in `tests/test_monitor.py` (`TestIncidentDB`: 6,
+  `TestBaseline`: 8). 80 tests total.
+
+## [2.1.0] - Released
 
 ### Added
 - **Kubernetes pod crash-loop scenario** (`k8s-pod-crashloop`, P1) - new

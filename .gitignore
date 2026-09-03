@@ -21,6 +21,9 @@ htmlcov/
 .hermes/
 *.env
 .env
+*.db
+baseline.json
+open_pagerduty_incidents.json
 
 # Editors / OS
 .vscode/
