@@ -121,17 +121,68 @@ def render_html(records: list[dict[str, Any]]) -> str:
     for r in sorted(records, key=lambda x: x.get("timestamp", ""), reverse=True)[:50]:
         sev = r.get("severity", "unknown").upper()
         color = SEVERITY_COLOR.get(sev, SEVERITY_COLOR["unknown"])
+        flap_badge = ' <span class="flap-badge" title="Flapping: repeated incidents of this category recently">🔁 flapping</span>' if r.get("flapping") else ""
         rows.append(f"""
         <tr>
           <td><span class="badge" style="background:{color}">{html.escape(sev)}</span></td>
           <td>{html.escape(str(r.get('timestamp', '')))}</td>
-          <td>{html.escape(str(r.get('category', 'unknown')))}</td>
+          <td>{html.escape(str(r.get('category', 'unknown')))}{flap_badge}</td>
           <td>{html.escape(str(r.get('root_cause', ''))[:120])}</td>
           <td>{'✅' if r.get('auto_remediated') else '-'}</td>
           <td>{html.escape(str(r.get('report_file', '')))}</td>
         </tr>""")
 
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    search_box = """
+    <div class="search-row">
+      <input type="text" id="incident-search" placeholder="Search incidents (severity, category, root cause, report file)..." autocomplete="off">
+      <span id="search-count" class="search-count"></span>
+    </div>""" if rows else ""
+
+    table_html = (
+        '<table id="incidents-table"><thead><tr><th>Severity</th><th>Timestamp</th>'
+        '<th>Category</th><th>Root Cause</th><th>Auto-fixed</th><th>Report</th></tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        '<div class="empty" id="no-results" style="display:none">No incidents match your search.</div>'
+    ) if rows else '<div class="empty">No incidents yet. Run the demo or the watchdog to populate this dashboard.</div>'
+
+    search_script = """
+  <script>
+    // Pure, unit-testable matcher: kept separate from DOM wiring below so it
+    // can be extracted and tested with a plain JS runtime (see
+    // tests/test_monitor.py::TestDashboard).
+    function rowMatches(text, query) {
+      if (!query) return true;
+      return text.toLowerCase().indexOf(query.toLowerCase()) !== -1;
+    }
+
+    (function () {
+      var input = document.getElementById('incident-search');
+      if (!input) return;
+      var rows = Array.prototype.slice.call(
+        document.querySelectorAll('#incidents-table tbody tr')
+      );
+      var noResults = document.getElementById('no-results');
+      var searchCount = document.getElementById('search-count');
+
+      input.addEventListener('input', function () {
+        var query = input.value;
+        var visible = 0;
+        rows.forEach(function (row) {
+          var match = rowMatches(row.textContent, query);
+          row.style.display = match ? '' : 'none';
+          if (match) visible++;
+        });
+        if (noResults) noResults.style.display = visible === 0 ? '' : 'none';
+        if (searchCount) {
+          searchCount.textContent = query
+            ? visible + ' / ' + rows.length + ' shown'
+            : '';
+        }
+      });
+    })();
+  </script>""" if rows else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -160,6 +211,18 @@ def render_html(records: list[dict[str, Any]]) -> str:
   .badge {{ color: #0d1117; font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 999px; }}
   .empty {{ color: #8b949e; text-align: center; padding: 40px 0; }}
   footer {{ color: #6e7681; font-size: 12px; margin-top: 20px; }}
+  .search-row {{ display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }}
+  .search-row input {{
+    flex: 1; background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; padding: 8px 12px; font-size: 13px; outline: none;
+  }}
+  .search-row input:focus {{ border-color: #58a6ff; }}
+  .search-count {{ color: #8b949e; font-size: 12px; white-space: nowrap; }}
+  .flap-badge {{
+    display: inline-block; margin-left: 6px; font-size: 11px; color: #f2994a;
+    background: rgba(242, 153, 74, 0.12); border: 1px solid rgba(242, 153, 74, 0.4);
+    border-radius: 999px; padding: 1px 8px;
+  }}
 </style>
 </head>
 <body>
@@ -180,10 +243,12 @@ def render_html(records: list[dict[str, Any]]) -> str:
 
   <div class="panel">
     <h2>Recent Incidents</h2>
-    {"<table><thead><tr><th>Severity</th><th>Timestamp</th><th>Category</th><th>Root Cause</th><th>Auto-fixed</th><th>Report</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>" if rows else '<div class="empty">No incidents yet. Run the demo or the watchdog to populate this dashboard.</div>'}
+    {search_box}
+    {table_html}
   </div>
 
   <footer>Hermes Incident Commander · built on Hermes Agent by NousResearch · dashboard renders 100% offline, no external requests</footer>
+{search_script}
 </body>
 </html>"""
 

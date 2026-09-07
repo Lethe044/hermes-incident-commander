@@ -27,6 +27,7 @@ from monitor.watchdog import (
     _clean_old_files,
     run_once,
     safe_remediate,
+    write_incident,
 )
 
 # ---------------------------------------------------------------------------
@@ -80,10 +81,101 @@ class TestNotifier:
         # A raw Exception isn't caught (only URLError is) - but URLError must be
         import urllib.error
         with patch("monitor.notifier.urllib.request.urlopen", side_effect=urllib.error.URLError("no route")):
-            notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2")
+            notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2", max_retries=0)
             results = notifier.send("hi")
             assert len(results) == 1
             assert results[0].ok is False
+
+
+# ---------------------------------------------------------------------------
+# Notifier - retry / backoff
+# ---------------------------------------------------------------------------
+
+class TestNotifierRetry:
+
+    @patch("monitor.notifier.time.sleep")
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_retries_on_transient_url_error_then_succeeds(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_resp = MagicMock()
+        mock_resp.status = 204
+        # first call fails (transient), second call succeeds
+        mock_urlopen.side_effect = [urllib.error.URLError("timed out"), MagicMock(__enter__=MagicMock(return_value=mock_resp), __exit__=MagicMock(return_value=False))]
+
+        notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2", max_retries=2, backoff_seconds=0.5)
+        results = notifier.send("hi")
+
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert "after 1 retry" in results[0].detail
+        assert mock_urlopen.call_count == 2
+        mock_sleep.assert_called_once_with(0.5)  # backoff_seconds * 2**0
+
+    @patch("monitor.notifier.time.sleep")
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_exhausts_retries_and_reports_failure(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError("no route to host")
+
+        notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2", max_retries=2, backoff_seconds=0.1)
+        results = notifier.send("hi")
+
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "gave up after 3 attempts" in results[0].detail
+        assert mock_urlopen.call_count == 3  # 1 initial + 2 retries
+        # exponential backoff: 0.1 * 2**0, then 0.1 * 2**1
+        assert [c.args[0] for c in mock_sleep.call_args_list] == [0.1, 0.2]
+
+    @patch("monitor.notifier.time.sleep")
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_does_not_retry_client_errors(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://discord.com/api/webhooks/1/2", 401, "Unauthorized", {}, None
+        )
+
+        notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2", max_retries=2)
+        results = notifier.send("hi")
+
+        assert len(results) == 1
+        assert results[0].ok is False
+        assert "not retrying a client error" in results[0].detail
+        assert mock_urlopen.call_count == 1  # no retries for a 401
+        mock_sleep.assert_not_called()
+
+    @patch("monitor.notifier.time.sleep")
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_retries_on_429_and_5xx(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        success = MagicMock(__enter__=MagicMock(return_value=mock_resp), __exit__=MagicMock(return_value=False))
+        mock_urlopen.side_effect = [
+            urllib.error.HTTPError("https://x", 503, "Service Unavailable", {}, None),
+            urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None),
+            success,
+        ]
+
+        notifier = Notifier(slack_webhook_url="https://hooks.slack.com/services/x", max_retries=2, backoff_seconds=0.01)
+        results = notifier.send("hi")
+
+        assert len(results) == 1
+        assert results[0].ok is True
+        assert mock_urlopen.call_count == 3
+
+    @patch("monitor.notifier.time.sleep")
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_zero_retries_means_single_attempt(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError("down")
+
+        notifier = Notifier(discord_webhook_url="https://discord.com/api/webhooks/1/2", max_retries=0)
+        results = notifier.send("hi")
+
+        assert mock_urlopen.call_count == 1
+        assert "gave up after 1 attempt" in results[0].detail
+        mock_sleep.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -686,3 +778,153 @@ class TestBaseline:
                            mem_percent=10, disk_percent=10, failed_services=[])
         # learned baseline for this hour justifies a threshold above 90.5
         assert metrics.breaches(cfg)["cpu"] is False
+
+
+# ---------------------------------------------------------------------------
+# Flapping detection
+# ---------------------------------------------------------------------------
+
+class TestFlapping:
+
+    def test_first_occurrence_is_not_flapping(self, tmp_path):
+        from monitor import flapping
+        r = flapping.record_and_check("cpu", "2026-01-01T10:00:00+00:00", path=tmp_path / "f.json")
+        assert r["count"] == 1
+        assert r["is_flapping"] is False
+
+    def test_third_occurrence_within_window_is_flapping(self, tmp_path):
+        from monitor import flapping
+        path = tmp_path / "f.json"
+        flapping.record_and_check("cpu", "2026-01-01T10:00:00+00:00", path=path)
+        flapping.record_and_check("cpu", "2026-01-01T10:15:00+00:00", path=path)
+        r = flapping.record_and_check("cpu", "2026-01-01T10:30:00+00:00", path=path)
+        assert r["count"] == 3
+        assert r["is_flapping"] is True
+
+    def test_different_categories_tracked_independently(self, tmp_path):
+        from monitor import flapping
+        path = tmp_path / "f.json"
+        flapping.record_and_check("cpu", "2026-01-01T10:00:00+00:00", path=path)
+        flapping.record_and_check("cpu", "2026-01-01T10:05:00+00:00", path=path)
+        r_disk = flapping.record_and_check("disk", "2026-01-01T10:10:00+00:00", path=path)
+        assert r_disk["count"] == 1
+        assert r_disk["is_flapping"] is False
+
+    def test_old_occurrences_outside_window_are_pruned(self, tmp_path):
+        from monitor import flapping
+        path = tmp_path / "f.json"
+        flapping.record_and_check("cpu", "2026-01-01T10:00:00+00:00", path=path)
+        flapping.record_and_check("cpu", "2026-01-01T10:15:00+00:00", path=path)
+        # 2 hours later - the first two entries are outside the 60-minute window
+        r = flapping.record_and_check("cpu", "2026-01-01T12:30:00+00:00", path=path)
+        assert r["count"] == 1
+        assert r["is_flapping"] is False
+
+    def test_custom_threshold_and_window(self, tmp_path):
+        from monitor import flapping
+        r = flapping.record_and_check(
+            "mem", "2026-01-01T10:00:00+00:00", flap_threshold=1, path=tmp_path / "f.json"
+        )
+        assert r["is_flapping"] is True
+
+    def test_write_incident_flags_flapping_in_report_and_history(self, tmp_path, monkeypatch):
+        import monitor.watchdog as wd
+        import monitor.flapping as flapping_mod
+        monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(flapping_mod, "FREQUENCY_FILE", tmp_path / "incident_frequency.json")
+
+        diagnosis = {
+            "severity": "P2", "category": "cpu",
+            "root_cause_hypothesis": "runaway cron",
+            "recommended_actions": [], "report_markdown": "# Report",
+        }
+        timestamps = [
+            "2026-01-01T10:00:00+00:00",
+            "2026-01-01T10:15:00+00:00",
+            "2026-01-01T10:30:00+00:00",
+        ]
+        report_path = None
+        for ts in timestamps:
+            metrics = Metrics(timestamp=ts, cpu_percent=95, mem_percent=10, disk_percent=10, failed_services=[])
+            report_path = wd.write_incident(metrics, diagnosis, [])
+
+        content = report_path.read_text()
+        assert "FLAPPING DETECTED" in content
+        assert "3rd `cpu` incident" in content
+
+        records = [json.loads(line) for line in wd.HISTORY_LOG.read_text().splitlines()]
+        assert records[0]["flapping"] is False
+        assert records[1]["flapping"] is False
+        assert records[2]["flapping"] is True
+
+    def test_ordinal_suffixes(self):
+        # Exercises the same suffix rules used in write_incident's report text.
+        def ordinal(n):
+            if 10 <= n % 100 <= 20:
+                return f"{n}th"
+            return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+        cases = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th", 11: "11th",
+                 12: "12th", 13: "13th", 21: "21st", 22: "22nd", 23: "23rd"}
+        for n, expected in cases.items():
+            assert ordinal(n) == expected
+
+
+# ---------------------------------------------------------------------------
+# Dashboard search box (client-side JS, extracted and run under Node)
+# ---------------------------------------------------------------------------
+
+class TestDashboardSearch:
+
+    def test_search_elements_present_when_there_are_records(self):
+        records = [
+            {"timestamp": "t1", "severity": "P0", "category": "service",
+             "root_cause": "nginx crashed", "auto_remediated": True, "report_file": "r1.md"},
+        ]
+        out = render_html(records)
+        assert 'id="incident-search"' in out
+        assert 'id="no-results"' in out
+        assert 'id="search-count"' in out
+        assert "function rowMatches" in out
+
+    def test_search_box_absent_when_no_records(self):
+        out = render_html([])
+        assert 'id="incident-search"' not in out
+        assert "function rowMatches" not in out
+
+    def test_flap_badge_rendered_for_flapping_incidents(self):
+        records = [
+            {"timestamp": "t1", "severity": "P2", "category": "cpu",
+             "root_cause": "x", "auto_remediated": False, "report_file": "r1.md", "flapping": True},
+            {"timestamp": "t2", "severity": "P2", "category": "cpu",
+             "root_cause": "x", "auto_remediated": False, "report_file": "r2.md", "flapping": False},
+        ]
+        out = render_html(records)
+        assert out.count('class="flap-badge"') == 1  # only the flapping one gets the badge
+
+    def test_rowmatches_js_behaves_correctly_under_node(self):
+        import re
+        import shutil
+        import subprocess
+
+        if shutil.which("node") is None:
+            import pytest
+            pytest.skip("node not available in this environment")
+
+        records = [
+            {"timestamp": "t1", "severity": "P0", "category": "service",
+             "root_cause": "nginx crashed", "auto_remediated": True, "report_file": "r1.md"},
+        ]
+        out = render_html(records)
+        match = re.search(r"function rowMatches\(text, query\) \{.*?\n    \}", out, re.S)
+        assert match, "rowMatches function not found in rendered HTML"
+
+        script = match.group(0) + """
+        if (rowMatches("nginx crashed", "") !== true) throw new Error("empty query should match");
+        if (rowMatches("NGINX crashed", "nginx") !== true) throw new Error("should be case-insensitive");
+        if (rowMatches("log rotation disabled", "nginx") !== false) throw new Error("non-match should be false");
+        console.log("ok");
+        """
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout

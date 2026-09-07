@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -57,11 +58,18 @@ class Notifier:
         slack_webhook_url: str | None = None,
         pagerduty_routing_key: str | None = None,
         timeout: int = 10,
+        max_retries: int = 2,
+        backoff_seconds: float = 0.5,
     ):
         self.discord_webhook_url = discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
         self.slack_webhook_url = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
         self.pagerduty_routing_key = pagerduty_routing_key or os.environ.get("PAGERDUTY_ROUTING_KEY")
         self.timeout = timeout
+        # A transient blip (DNS hiccup, 502 from Discord, a dropped
+        # connection) shouldn't mean a real P0 page never goes out. Retries
+        # only kick in for retryable failures - see _post_json.
+        self.max_retries = max_retries
+        self.backoff_seconds = backoff_seconds
 
     @property
     def configured(self) -> bool:
@@ -72,16 +80,43 @@ class Notifier:
     # -- low level -----------------------------------------------------
 
     def _post_json(self, url: str, payload: dict) -> NotifyResult:
+        """POSTs `payload` as JSON to `url`, retrying transient failures
+        (timeouts, connection errors, HTTP 429/5xx) with exponential
+        backoff. Non-retryable client errors (4xx other than 429) fail
+        fast - retrying a bad payload or bad auth token would never
+        succeed and would only delay reporting the failure."""
         data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        channel = url.split("/")[2]
+        attempts = self.max_retries + 1
+        last_detail = ""
+
+        for attempt in range(attempts):
+            try:
+                req = urllib.request.Request(
+                    url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    detail = f"HTTP {resp.status}"
+                    if attempt:
+                        detail += f" (succeeded after {attempt} retr{'y' if attempt == 1 else 'ies'})"
+                    return NotifyResult(channel=channel, ok=True, detail=detail)
+            except urllib.error.HTTPError as exc:
+                last_detail = f"HTTP {exc.code}"
+                if exc.code != 429 and exc.code < 500:
+                    return NotifyResult(
+                        channel=channel, ok=False,
+                        detail=f"{last_detail} (not retrying a client error)",
+                    )
+            except urllib.error.URLError as exc:
+                last_detail = str(getattr(exc, "reason", exc))
+
+            if attempt < attempts - 1:
+                time.sleep(self.backoff_seconds * (2 ** attempt))
+
+        return NotifyResult(
+            channel=channel, ok=False,
+            detail=f"{last_detail} (gave up after {attempts} attempt{'s' if attempts != 1 else ''})",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return NotifyResult(channel=url.split("/")[2], ok=200 <= resp.status < 300,
-                                     detail=f"HTTP {resp.status}")
-        except urllib.error.URLError as exc:
-            return NotifyResult(channel=url.split("/")[2], ok=False, detail=str(exc))
 
     def send(self, message: str, title: str | None = None) -> list[NotifyResult]:
         """Send a plain-text style message to every configured channel."""

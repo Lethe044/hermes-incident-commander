@@ -3,7 +3,36 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.2.0] - Unreleased
+## [2.3.0] - Unreleased
+
+### Added
+- **Search box in the offline dashboard** - `monitor/dashboard.py`'s
+  "Recent Incidents" table now has a live, client-side search/filter
+  (severity, category, root cause, or report filename). Pure vanilla JS,
+  no new dependency; only rendered when there's at least one incident.
+- **Notifier retry/backoff** - `monitor/notifier.py`'s `_post_json` now
+  retries transient failures (timeouts, connection errors, HTTP 429/5xx)
+  with exponential backoff (`max_retries=2`, `backoff_seconds=0.5` by
+  default, both configurable on `Notifier(...)`). Non-retryable client
+  errors (4xx other than 429) fail fast instead of wasting time retrying
+  a bad payload or bad auth token.
+- **Flapping detection** (`monitor/flapping.py`) - tracks how often each
+  incident category has fired recently. 3+ incidents of the same category
+  within 60 minutes (both configurable) gets flagged with a
+  "⚠️ FLAPPING DETECTED" banner at the top of the incident report, a
+  console warning, a `flapping` field in `history.jsonl`, and a
+  "🔁 flapping" badge in the dashboard table.
+- **`scripts/install-watchdog.sh`** - a one-command systemd installer for
+  the watchdog. Dry-run by default (nothing is written until you pass
+  `--yes`); idempotent; writes secrets to a root-only (chmod 600)
+  EnvironmentFile rather than embedding them in the unit file; refuses to
+  proceed with `--yes` if systemd isn't actually reachable instead of
+  failing halfway through. `--uninstall --yes` removes it again.
+- 26 new tests in `tests/test_monitor.py` (`TestNotifierRetry`: 5,
+  `TestFlapping`: 7, `TestDashboardSearch`: 4, plus baseline/incident_db
+  coverage from 2.2.0). 96 tests total across the suite.
+
+## [2.2.0] - Released
 
 ### Added
 - **2 more cloud-native incident scenarios**: `ecs-task-crashloop` (P1) and

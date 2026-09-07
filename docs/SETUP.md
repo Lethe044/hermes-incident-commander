@@ -19,6 +19,35 @@ python demo/demo_incident.py --scenario disk-full-logs
 
 ---
 
+## Standalone Watchdog (Real Server, No Hermes Required)
+
+If you just want the watchdog running on a real Linux server - not the
+sandboxed demo above - see the [Standalone Mode section of the
+README](../README.md#standalone-mode-no-hermes-required) for the full
+`python -m monitor.watchdog` walkthrough (thresholds, `--dry-run`,
+notifications, adaptive thresholds, Prometheus metrics).
+
+To run it as a systemd service that survives reboots and restarts itself
+on crash, use the installer instead of writing a unit file by hand:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# See exactly what it would do first - writes nothing
+./scripts/install-watchdog.sh
+
+# Then actually install it
+sudo ./scripts/install-watchdog.sh --yes --auto-remediate --adaptive-thresholds
+```
+
+It's idempotent (safe to re-run after changing flags) and reversible:
+
+```bash
+sudo ./scripts/install-watchdog.sh --uninstall --yes
+```
+
+See `SAFETY.md` for how it handles your API key/secrets.
+
 ## Full Setup (With Hermes Agent)
 
 ### Step 1: Install Hermes Agent

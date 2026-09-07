@@ -15,24 +15,25 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
   SSH instead of one process per host. Needs careful thought before it
   touches `SAFETY.md`'s threat model - remote command execution changes the
   risk profile even if remediation stays allow-listed.
-- **One-command install scripts** - a `curl | bash`-style installer (or
-  Ansible role) that sets up the watchdog as a systemd service, on a couple
-  of common targets (Ubuntu/Debian on a plain VM, DigitalOcean, Hetzner).
-- **Search box in the offline dashboard** - `monitor/dashboard.py` already
-  renders a recent-incidents table; wire a small client-side filter (or a
-  link that shells out to `monitor/incident_db.py --search`) so you don't
-  need a separate terminal to answer "have we seen this before?".
-- **Notifier delivery retry/backoff** - Discord/Slack/PagerDuty calls in
-  `monitor/notifier.py` currently fire once; a transient network blip during
-  a real incident shouldn't mean the page never goes out. A couple of
-  retries with backoff, still stdlib-only.
-- **Auto-tune `consecutive_breaches_required`** - if the watchdog is
-  auto-remediating the same category over and over with no real incident
-  (flapping), that's a signal the sensitivity is off; surface it instead of
-  silently keeping the noisy default.
+- **Suggest a threshold, don't just flag flapping** - `monitor/flapping.py`
+  (2.3.0) flags repeated incidents but doesn't act on it. Once it's flagged
+  something a few times, the watchdog could suggest a concrete
+  `--adaptive-thresholds`/config change instead of just repeating the warning.
 - **Slash-command / webhook query into `incident_db.py`** - let a Slack or
   Discord bot answer "have we seen X before?" by querying the SQLite index
   directly, instead of requiring shell access to the host.
+- **Trend chart in the offline dashboard** - `monitor/dashboard.py` shows
+  counts by severity today; a small incidents-per-day line (still hand-rolled
+  SVG, no chart.js) would make "is this getting better or worse" visible at
+  a glance.
+- **`--validate-config`** - a watchdog flag that checks a
+  `watchdog_config.yaml` for typos/invalid allow-list entries and prints
+  what it would actually do, without starting the watchdog. Complements
+  `--dry-run`, which validates behavior against live metrics rather than
+  the config file itself.
+- **CSV/JSON export from `incident_db.py --search`** - the CLI prints to
+  stdout today; a `--format json`/`--format csv` flag would make it easy to
+  pipe into a weekly incident-review report.
 
 ## Explicitly out of scope (for now)
 

@@ -75,6 +75,16 @@ constraints:
   sensitivity as `history.jsonl` itself - incident root-cause text, not
   secrets. Neither module opens a network port or executes anything; both
   only ever read/write files under `~/.hermes/incidents/`.
+- `scripts/install-watchdog.sh` writes `ANTHROPIC_API_KEY` and any
+  configured webhook/PagerDuty secrets to a dedicated `EnvironmentFile`
+  (`/etc/hermes-incident-commander/watchdog.env`, `chmod 600`, owned by
+  root) rather than embedding them in the systemd unit file - unit files
+  are frequently world-readable and show up verbatim in `systemctl cat` /
+  `ps aux`, which a plain `Environment=` directive would expose. The
+  installed service also runs with `NoNewPrivileges=true` and
+  `ProtectSystem=strict`. The script is dry-run by default; it only writes
+  files or touches systemd once you pass `--yes`, and refuses to do either
+  as a non-root user or when systemd isn't actually reachable.
 
 ## Reporting a security issue
 

@@ -383,13 +383,42 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
     slug = f"{ts}-{category}"
     report_path = INCIDENT_DIR / f"{slug}.md"
 
+    # Best-effort flapping check: never let this block writing the report.
+    flap_info: dict[str, Any] = {"is_flapping": False, "count": 1, "window_minutes": 0}
+    try:
+        from monitor import flapping
+        flap_info = flapping.record_and_check(category, metrics.timestamp)
+    except Exception:
+        pass
+
+    def _ordinal(n: int) -> str:
+        if 10 <= n % 100 <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+        return f"{n}{suffix}"
+
     body = diagnosis.get("report_markdown", "").strip()
+    if flap_info["is_flapping"]:
+        body = (
+            f"> ⚠️ **FLAPPING DETECTED**: this is the {_ordinal(flap_info['count'])} `{category}` "
+            f"incident in the last {flap_info['window_minutes']} minutes. This usually means "
+            f"either the root cause isn't actually being fixed, or the threshold for this "
+            f"metric is tuned too tight for normal load (see `--adaptive-thresholds` in "
+            f"README.md).\n\n"
+        ) + body
     if performed_actions:
         body += "\n\n## Auto-Remediation Performed\n" + "\n".join(f"- {a}" for a in performed_actions)
     else:
         body += "\n\n## Auto-Remediation Performed\nNone (observe-only mode, or nothing matched the allow-list)."
 
     report_path.write_text(body + "\n")
+
+    if flap_info["is_flapping"]:
+        print(
+            f"  ⚠️  FLAPPING: {flap_info['count']} '{category}' incidents in the last "
+            f"{flap_info['window_minutes']} min - see {report_path.name}"
+        )
 
     # Structured JSONL record - consumed by monitor/dashboard.py
     with open(HISTORY_LOG, "a") as f:
@@ -404,6 +433,7 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
             "auto_remediated": bool(performed_actions),
             "actions": performed_actions,
             "report_file": str(report_path.name),
+            "flapping": flap_info["is_flapping"],
         }) + "\n")
 
     # Best-effort: keep the local search index (monitor/incident_db.py) in

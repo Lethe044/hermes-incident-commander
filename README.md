@@ -16,38 +16,33 @@ no Hermes installation required.
 
 ## What's New
 
+- 🔎 **Search box in the offline dashboard** - filter incidents by
+  severity, category, root cause, or report filename, client-side, no server.
+- 🔁 **Notifier retry/backoff** - a transient network blip during a real
+  incident no longer means the page silently never goes out.
+- 🌀 **Flapping detection** - 3+ incidents of the same category within an
+  hour get flagged in the report, the console, and the dashboard instead of
+  repeating silently forever.
+- 🛠️ **`scripts/install-watchdog.sh`** - one-command systemd install for
+  the watchdog. Dry-run by default; safe by design. See [Standalone Mode](#standalone-mode-no-hermes-required).
 - 🔍 **Local incident search** - `monitor/incident_db.py` builds a SQLite +
-  full-text-search index over your incident history (`--sync` / `--search`),
-  auto-updated after every incident. No server, no new dependency.
+  full-text-search index over your incident history, auto-updated after
+  every incident. No server, no new dependency.
 - 📅 **Adaptive, time-of-day-aware thresholds** - `--adaptive-thresholds`
   learns a per-hour baseline so a predictable nightly batch job doesn't page
   you, while still catching real anomalies. Opt-in; can only raise the bar
   above your configured threshold, never lower it.
-- ☁️ **2 more cloud-native scenarios** - `ecs-task-crashloop` and
-  `lambda-timeout-spike`, alongside the existing Docker/Kubernetes ones. 10
-  incident scenarios total.
-- 📈 **Grafana dashboard JSON** - a ready-to-import dashboard
-  (`docs/assets/grafana-dashboard.json`) for the Prometheus `/metrics`
-  endpoint, so `--metrics-port` users don't have to build panels by hand.
-- 🧪 **`--dry-run` mode** - preview exactly what `--auto-remediate` would
-  restart or delete, without touching anything. See [Standalone Mode](#standalone-mode-no-hermes-required).
-- 📈 **Prometheus `/metrics` endpoint** - optional, stdlib-only exporter for
-  plugging the watchdog into an existing observability stack.
-- 🔁 **PagerDuty resolve wiring** - the watchdog now closes PagerDuty
-  incidents automatically once a breach recovers, instead of leaving them open.
-- 📟 **PagerDuty integration** - the notifier can trigger (and resolve)
-  PagerDuty incidents via the Events API v2, alongside Discord/Slack, with
-  zero new dependencies.
+- ☁️ **10 incident scenarios total** - including Docker, Kubernetes, ECS,
+  and Lambda, alongside the original service/disk/memory/CPU/network ones.
+- 📈 **Prometheus `/metrics` + a ready-to-import Grafana dashboard JSON**,
+  and a **`--dry-run` mode** to preview `--auto-remediate` before trusting it.
+- 📟 **PagerDuty integration** (trigger + auto-resolve), alongside
+  Discord/Slack, with zero new dependencies.
 - 🛰️ **Standalone Watchdog** - monitor a real host's CPU/memory/disk and failed
   systemd units, get Claude-powered triage, and (opt-in) safe auto-remediation.
   No Hermes install needed.
-- 📊 **Offline HTML Dashboard** - a single, dependency-free file summarizing your
-  incident history. No server, no CDN, works offline. [See a screenshot.](#standalone-mode-no-hermes-required)
-- ✅ **CI on every push** - the test suite and smoke test run automatically via
-  GitHub Actions across Python 3.10-3.12.
-- 🔒 **SAFETY.md** - a written threat model for the difference between demo mode
-  (full shell access, sandbox only) and the watchdog's allow-listed remediation.
-- 🗺️ **ROADMAP.md** - a living backlog for where this project goes next.
+- 📊 **Offline HTML Dashboard**, **CI on every push**, a written
+  **[SAFETY.md](SAFETY.md)** threat model, and a living **[ROADMAP.md](ROADMAP.md)**.
 
 Full history in [CHANGELOG.md](CHANGELOG.md) · what's coming in [ROADMAP.md](ROADMAP.md).
 
@@ -146,6 +141,10 @@ python -m monitor.watchdog --show-baseline
 # Search past incidents ("have we seen this before?") - no server, just SQLite
 python -m monitor.incident_db --sync
 python -m monitor.incident_db --search "nginx"
+
+# One-command systemd install (dry-run by default - see exactly what it would do)
+./scripts/install-watchdog.sh
+sudo ./scripts/install-watchdog.sh --yes --auto-remediate --adaptive-thresholds
 ```
 
 Unlike the demo/training environment, the watchdog **never gives the model
@@ -169,13 +168,28 @@ Discord, Slack, and/or PagerDuty (via the Events API v2) - so it's safe to
 set all three; nothing extra fires for channels you leave unconfigured. When
 PagerDuty is configured, the watchdog also tracks which breach types have an
 open incident and calls PagerDuty's resolve endpoint automatically once
-things recover, instead of leaving pages open forever.
+things recover, instead of leaving pages open forever. Delivery to any
+channel now retries transient failures (timeouts, connection drops, HTTP
+429/5xx) with exponential backoff, so a brief network blip during a real
+incident doesn't mean the page silently never arrives.
+
+If the same category of incident fires 3+ times within an hour,
+`monitor/flapping.py` flags it - a "⚠️ FLAPPING DETECTED" banner at the top
+of the report, a console warning, and a badge in the dashboard - since
+that's usually either a root cause that isn't actually fixed, or a
+threshold tuned too tight for normal load.
 
 Every incident is also indexed by `monitor/incident_db.py` (SQLite, with a
 full-text search index when your Python's SQLite has FTS5 - falling back to
 a plain `LIKE` scan otherwise) so "have we seen this before?" works without
 a full Hermes install. `write_incident()` keeps it in sync automatically;
 `--sync`/`--search` are there for manual use or a cron job.
+
+Want it running on boot without setting up the systemd unit by hand?
+[`scripts/install-watchdog.sh`](scripts/install-watchdog.sh) does that in
+one command - dry-run by default, and it writes your API key/secrets to a
+root-only file rather than into the unit file itself. `--uninstall --yes`
+removes it again.
 
 Once you have some incident history, generate a dashboard:
 
@@ -191,7 +205,7 @@ a recent-incidents table.
   <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data" width="700">
 </p>
 
-<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history, not a mockup.</sub></p>
+<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the search box and a flapping badge), not a mockup.</sub></p>
 
 If you already run Prometheus and Grafana, you can scrape the watchdog
 directly instead of (or alongside) the dashboard - `--metrics-port` starts a
@@ -271,6 +285,7 @@ graph LR
     ROOT --> ENVS["📁 environments/"]
     ROOT --> DEMO["📁 demo/"]
     ROOT --> MON["📁 monitor/"]
+    ROOT --> SCRIPTS["📁 scripts/"]
     ROOT --> TESTS["📁 tests/"]
     ROOT --> DOCS["📁 docs/"]
     ROOT --> CI["📁 .github/workflows/"]
@@ -284,13 +299,16 @@ graph LR
     DEMO --> DEMO_PY["🐍 demo_incident.py<br/>← standalone sandboxed demo"]
 
     MON --> WATCHDOG["🐍 watchdog.py<br/>← real-host monitor, no Hermes needed"]
-    MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack / PagerDuty"]
-    MON --> DASH["🐍 dashboard.py<br/>← offline HTML dashboard"]
+    MON --> NOTIFY["🐍 notifier.py<br/>← Discord / Slack / PagerDuty, with retry"]
+    MON --> DASH["🐍 dashboard.py<br/>← offline HTML dashboard + search"]
     MON --> PROM["🐍 prometheus_exporter.py<br/>← optional /metrics endpoint"]
     MON --> IDB["🐍 incident_db.py<br/>← SQLite + full-text search"]
     MON --> BASE["🐍 baseline.py<br/>← time-of-day-aware thresholds"]
+    MON --> FLAP["🐍 flapping.py<br/>← repeated-incident detection"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 80 pytest cases"]
+    SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
+
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 96 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -309,6 +327,8 @@ graph LR
     style PROM fill:#1a4731,color:#fff
     style IDB fill:#1a4731,color:#fff
     style BASE fill:#1a4731,color:#fff
+    style FLAP fill:#1a4731,color:#fff
+    style INSTALL fill:#7b2d00,color:#fff
     style CIWORKFLOW fill:#2d2d2d,color:#fff
 ```
 
@@ -408,9 +428,10 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (80 tests: scenarios, reward function, skill file,
-# demo script, notifier incl. PagerDuty, watchdog dry-run/resolve wiring,
-# Prometheus exporter, incident search (SQLite/FTS), adaptive baseline, dashboard)
+# Run full test suite (96 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. PagerDuty + retry/backoff, watchdog
+# dry-run/resolve wiring, Prometheus exporter, incident search (SQLite/FTS),
+# adaptive baseline, flapping detection, dashboard incl. search box)
 pytest tests/ -v
 
 # Run specific test classes
@@ -437,7 +458,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 80 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 96 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 
