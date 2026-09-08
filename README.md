@@ -16,6 +16,18 @@ no Hermes installation required.
 
 ## What's New
 
+- 📈 **Trend chart in the offline dashboard** - a 14-day incidents-per-day
+  line chart (still a hand-rolled SVG, no chart.js) sits next to the
+  severity breakdown so "is this getting better or worse" is visible at a
+  glance.
+- ✅ **`--validate-config`** - checks a `watchdog_config.yaml` for typos
+  (unrecognized keys), out-of-range thresholds, and invalid allow-list
+  entries, prints the resolved config, and exits - without starting the
+  watchdog. Complements `--dry-run`, which validates behavior against live
+  metrics rather than the config file itself.
+- 📤 **CSV/JSON export from `incident_db.py --search`** - `--format json`
+  or `--format csv` alongside the default human-readable text, so a search
+  can be piped straight into a weekly incident-review report.
 - 🔎 **Search box in the offline dashboard** - filter incidents by
   severity, category, root cause, or report filename, client-side, no server.
 - 🔁 **Notifier retry/backoff** - a transient network blip during a real
@@ -141,6 +153,10 @@ python -m monitor.watchdog --show-baseline
 # Search past incidents ("have we seen this before?") - no server, just SQLite
 python -m monitor.incident_db --sync
 python -m monitor.incident_db --search "nginx"
+python -m monitor.incident_db --search "nginx" --format json     # or --format csv
+
+# Check a config file for typos/invalid allow-list entries before using it
+python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
 
 # One-command systemd install (dry-run by default - see exactly what it would do)
 ./scripts/install-watchdog.sh
@@ -183,7 +199,16 @@ Every incident is also indexed by `monitor/incident_db.py` (SQLite, with a
 full-text search index when your Python's SQLite has FTS5 - falling back to
 a plain `LIKE` scan otherwise) so "have we seen this before?" works without
 a full Hermes install. `write_incident()` keeps it in sync automatically;
-`--sync`/`--search` are there for manual use or a cron job.
+`--sync`/`--search` are there for manual use or a cron job, and `--format
+json`/`--format csv` let you pipe a search straight into another tool or a
+weekly incident-review report instead of only reading it on screen.
+
+Before trusting a new `watchdog_config.yaml`, run `--validate-config`: it
+flags unrecognized keys (a likely typo), thresholds outside 0-100,
+negative intervals, and allow-list entries that don't actually match
+anything (like a `restart_services` entry for a service that isn't in
+`watched_services`) - then prints the fully resolved config and exits,
+without starting the watchdog.
 
 Want it running on boot without setting up the systemd unit by hand?
 [`scripts/install-watchdog.sh`](scripts/install-watchdog.sh) does that in
@@ -198,14 +223,14 @@ python -m monitor.dashboard --open
 ```
 
 This writes a single, self-contained HTML file (no server, no external
-requests) summarizing incident counts by severity, auto-remediation rate, and
-a recent-incidents table.
+requests) summarizing incident counts by severity, a 14-day incidents-per-day
+trend, auto-remediation rate, and a searchable recent-incidents table.
 
 <p align="center">
-  <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data" width="700">
+  <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data, including the incidents-per-day trend chart" width="700">
 </p>
 
-<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the search box and a flapping badge), not a mockup.</sub></p>
+<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the 14-day trend chart, search box, and a flapping badge), not a mockup.</sub></p>
 
 If you already run Prometheus and Grafana, you can scrape the watchdog
 directly instead of (or alongside) the dashboard - `--metrics-port` starts a
@@ -308,7 +333,7 @@ graph LR
 
     SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 96 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 130 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -428,10 +453,11 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (96 tests: scenarios, reward function, skill file,
+# Run full test suite (130 tests: scenarios, reward function, skill file,
 # demo script, notifier incl. PagerDuty + retry/backoff, watchdog
-# dry-run/resolve wiring, Prometheus exporter, incident search (SQLite/FTS),
-# adaptive baseline, flapping detection, dashboard incl. search box)
+# dry-run/resolve wiring/--validate-config, Prometheus exporter, incident
+# search (SQLite/FTS + CSV/JSON export), adaptive baseline, flapping
+# detection, dashboard incl. search box + trend chart)
 pytest tests/ -v
 
 # Run specific test classes
@@ -458,7 +484,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 96 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 130 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 

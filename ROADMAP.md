@@ -22,18 +22,6 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Slash-command / webhook query into `incident_db.py`** - let a Slack or
   Discord bot answer "have we seen X before?" by querying the SQLite index
   directly, instead of requiring shell access to the host.
-- **Trend chart in the offline dashboard** - `monitor/dashboard.py` shows
-  counts by severity today; a small incidents-per-day line (still hand-rolled
-  SVG, no chart.js) would make "is this getting better or worse" visible at
-  a glance.
-- **`--validate-config`** - a watchdog flag that checks a
-  `watchdog_config.yaml` for typos/invalid allow-list entries and prints
-  what it would actually do, without starting the watchdog. Complements
-  `--dry-run`, which validates behavior against live metrics rather than
-  the config file itself.
-- **CSV/JSON export from `incident_db.py --search`** - the CLI prints to
-  stdout today; a `--format json`/`--format csv` flag would make it easy to
-  pipe into a weekly incident-review report.
 
 ## Explicitly out of scope (for now)
 

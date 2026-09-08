@@ -24,7 +24,7 @@ import json
 import re
 import webbrowser
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +108,86 @@ def bar_svg(counts: Counter, width: int = 480, height: int = 160) -> str:
     return (
         f'<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px">'
         + "".join(bars) + "</svg>"
+    )
+
+
+def _incident_date(ts: str) -> str | None:
+    """Extracts a YYYY-MM-DD date from an incident timestamp for grouping
+    by day. Tries a real ISO-8601 parse first; falls back to a plain
+    prefix check for hand-typed dates that fromisoformat rejects (still
+    correct, just not timezone-aware)."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        if len(ts) >= 10 and ts[4] == "-" and ts[7] == "-":
+            return ts[:10]
+        return None
+
+
+def trend_svg(records: list[dict[str, Any]], width: int = 480, height: int = 140, days: int = 14) -> str:
+    """A tiny hand-rolled SVG line chart of incidents-per-day over the
+    trailing `days` days (today inclusive) - same no-chart.js/no-CDN style
+    as bar_svg, so "is this getting better or worse" is visible at a
+    glance without leaving the offline dashboard."""
+    counts_by_date: Counter[str] = Counter()
+    for r in records:
+        d = _incident_date(str(r.get("timestamp", "")))
+        if d:
+            counts_by_date[d] += 1
+
+    today = datetime.now().date()
+    day_list = [(today - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+    values = [counts_by_date.get(d, 0) for d in day_list]
+
+    if not any(values):
+        return (
+            f'<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px">'
+            f'<text x="{width / 2}" y="{height / 2}" text-anchor="middle" '
+            f'font-size="12" fill="#6b7280">No incidents in the last {days} days</text></svg>'
+        )
+
+    max_count = max(values + [1])
+    pad_left, pad_bottom, pad_top = 24, 20, 14
+    plot_w = width - pad_left - 10
+    plot_h = height - pad_bottom - pad_top
+    n = len(day_list)
+    step = plot_w / max(n - 1, 1)
+
+    points = []
+    for i, v in enumerate(values):
+        x = pad_left + i * step
+        y = pad_top + plot_h - (v / max_count) * plot_h
+        points.append((x, y))
+
+    path_d = "M " + " L ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    area_d = path_d + f" L {points[-1][0]:.1f},{pad_top + plot_h:.1f} L {points[0][0]:.1f},{pad_top + plot_h:.1f} Z"
+
+    dots = "".join(
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.5" fill="#58a6ff" />' for x, y in points
+    )
+
+    # Only label the first, middle, and last day - labelling all 14+ points
+    # would overlap at this width. Anchor the first/last labels to their
+    # own edge (not centered) so they don't clip past the viewBox.
+    label_idxs = sorted({0, n // 2, n - 1})
+    label_parts = []
+    for i in label_idxs:
+        anchor = "start" if i == 0 else "end" if i == n - 1 else "middle"
+        label_parts.append(
+            f'<text x="{points[i][0]:.1f}" y="{height - 4}" text-anchor="{anchor}" '
+            f'font-size="10" fill="#6b7280">{day_list[i][5:]}</text>'
+        )
+    labels = "".join(label_parts)
+
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px">'
+        f'<path d="{area_d}" fill="#58a6ff" fill-opacity="0.12" stroke="none" />'
+        f'<path d="{path_d}" fill="none" stroke="#58a6ff" stroke-width="2" />'
+        + dots + labels +
+        f'<text x="{pad_left}" y="{pad_top - 2}" font-size="10" fill="#6b7280">max {max_count}/day</text>'
+        "</svg>"
     )
 
 
@@ -239,6 +319,11 @@ def render_html(records: list[dict[str, Any]]) -> str:
   <div class="panel">
     <h2>Incidents by Severity</h2>
     {bar_svg(counts)}
+  </div>
+
+  <div class="panel">
+    <h2>Incidents per Day (last 14 days)</h2>
+    {trend_svg(records)}
   </div>
 
   <div class="panel">

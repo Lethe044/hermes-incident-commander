@@ -18,15 +18,23 @@ Usage:
     python -m monitor.incident_db --sync              # (re)build the index from history.jsonl
     python -m monitor.incident_db --search "nginx"     # full-text search
     python -m monitor.incident_db --search "disk full" --limit 5
+    python -m monitor.incident_db --search "nginx" --format json
+    python -m monitor.incident_db --search "nginx" --format csv > incidents.csv
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+RESULT_FIELDS = [
+    "timestamp", "severity", "category", "root_cause", "report_file", "auto_remediated",
+]
 
 INCIDENT_DIR = Path.home() / ".hermes" / "incidents"
 HISTORY_LOG = INCIDENT_DIR / "history.jsonl"
@@ -213,6 +221,32 @@ def search(
     return results
 
 
+def format_results(results: list[dict[str, Any]], fmt: str = "text") -> str:
+    """Renders search results as `text` (the original human-readable
+    two-line-per-incident format), `json` (a JSON array, one object per
+    incident), or `csv` (a header row plus one row per incident) - so the
+    same search() output can be piped into a report or another tool
+    instead of only being printed for a human to read."""
+    if fmt == "json":
+        return json.dumps(results, indent=2)
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=RESULT_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for r in results:
+            writer.writerow(r)
+        return buf.getvalue().rstrip("\n")
+
+    if not results:
+        return "No matching incidents found."
+    lines = []
+    for r in results:
+        lines.append(f"[{r['severity']}] {r['timestamp']} ({r['category']}) - {r['root_cause'][:100]}")
+        lines.append(f"    report: {r['report_file']}")
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Hermes Incident Commander - local incident search (SQLite, no server)"
@@ -220,6 +254,11 @@ def main() -> None:
     parser.add_argument("--sync", action="store_true", help="(Re)build the index from history.jsonl")
     parser.add_argument("--search", metavar="QUERY", help="Search past incidents")
     parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument(
+        "--format", choices=["text", "json", "csv"], default="text",
+        help="Output format for --search results (default: text). "
+             "json/csv are meant to be piped into a report or another tool.",
+    )
     args = parser.parse_args()
 
     if not args.sync and not args.search:
@@ -234,11 +273,9 @@ def main() -> None:
 
         if args.search:
             results = search(args.search, limit=args.limit, conn=conn)
-            if not results:
-                print("No matching incidents found.")
-            for r in results:
-                print(f"[{r['severity']}] {r['timestamp']} ({r['category']}) - {r['root_cause'][:100]}")
-                print(f"    report: {r['report_file']}")
+            output = format_results(results, fmt=args.format)
+            if output:
+                print(output)
     finally:
         conn.close()
 

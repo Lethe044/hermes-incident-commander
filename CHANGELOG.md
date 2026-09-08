@@ -3,7 +3,39 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.3.0] - Unreleased
+## [2.4.0] - Unreleased
+
+### Added
+- **Trend chart in the offline dashboard** - `monitor/dashboard.py` now
+  renders a 14-day incidents-per-day line chart (`trend_svg()`, same
+  hand-rolled-SVG/no-chart.js style as the severity bar chart) in its own
+  panel between "Incidents by Severity" and the incidents table, so "is
+  this getting better or worse" is visible at a glance without leaving the
+  offline dashboard. Groups incidents by day from their timestamp (real
+  ISO-8601 parse with a plain-prefix fallback for hand-typed dates);
+  renders a "No incidents in the last N days" message instead of an empty
+  chart when there's nothing to show.
+- **`--validate-config`** - `monitor/watchdog.py --config PATH
+  --validate-config` checks the file for unrecognized keys (a likely
+  typo - these were previously silently ignored), thresholds outside
+  0-100, a non-positive `poll_interval_seconds`, an invalid
+  `consecutive_breaches_required`/`cooldown_minutes`, and allow-list
+  entries that don't actually match anything (e.g. a `restart_services`
+  entry for a service that isn't in `watched_services`, or
+  `auto_remediate: true` with an empty allow-list). Prints the fully
+  resolved config and exits 0/1 - without starting the watchdog.
+  Complements `--dry-run`, which validates behavior against live metrics
+  rather than the config file itself.
+- **CSV/JSON export from `incident_db.py --search`** - `--format json` or
+  `--format csv` alongside the existing default text output
+  (`format_results()`), so a search's results can be piped straight into
+  another tool or a weekly incident-review report instead of only being
+  read on screen.
+- 34 new tests in `tests/test_monitor.py` (`TestIncidentDBExport`: 7,
+  `TestValidateConfig`: 20, `TestDashboardTrend`: 7). 130 tests total
+  across the suite.
+
+## [2.3.0] - Released
 
 ### Added
 - **Search box in the offline dashboard** - `monitor/dashboard.py`'s

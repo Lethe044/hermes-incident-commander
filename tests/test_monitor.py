@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from monitor.dashboard import bar_svg, load_from_jsonl, render_html
+from monitor.dashboard import bar_svg, load_from_jsonl, render_html, trend_svg
 from monitor.notifier import Notifier
 from monitor.watchdog import (
     Metrics,
@@ -27,6 +27,7 @@ from monitor.watchdog import (
     _clean_old_files,
     run_once,
     safe_remediate,
+    validate_config,
     write_incident,
 )
 
@@ -296,6 +297,169 @@ class TestWatchdogConfig:
         assert cfg.watched_services == ["nginx"]
         # Untouched fields keep their defaults
         assert cfg.mem_threshold == 90.0
+
+
+class TestValidateConfig:
+
+    def _write(self, tmp_path, text):
+        p = tmp_path / "cfg.yaml"
+        p.write_text(text)
+        return str(p)
+
+    def test_valid_minimal_config_has_no_errors(self, tmp_path):
+        path = self._write(tmp_path, "cpu_threshold: 80\nwatched_services: [nginx]\n")
+        errors, warnings = validate_config(path)
+        assert errors == []
+
+    def test_missing_file_is_an_error(self, tmp_path):
+        errors, warnings = validate_config(str(tmp_path / "does_not_exist.yaml"))
+        assert len(errors) == 1
+        assert "not found" in errors[0]
+
+    def test_invalid_yaml_syntax_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "cpu_threshold: [unclosed\n")
+        errors, warnings = validate_config(path)
+        assert len(errors) == 1
+        assert "YAML" in errors[0]
+
+    def test_non_mapping_yaml_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "- just\n- a\n- list\n")
+        errors, warnings = validate_config(path)
+        assert len(errors) == 1
+        assert "mapping" in errors[0]
+
+    def test_unknown_key_is_a_warning_not_an_error(self, tmp_path):
+        path = self._write(tmp_path, "cpu_thresholdd: 80\n")  # typo'd key
+        errors, warnings = validate_config(path)
+        assert errors == []
+        assert any("cpu_thresholdd" in w and "typo" in w for w in warnings)
+
+    def test_threshold_out_of_range_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "cpu_threshold: 150\n")
+        errors, warnings = validate_config(path)
+        assert any("cpu_threshold" in e for e in errors)
+
+    def test_threshold_wrong_type_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "cpu_threshold: not-a-number\n")
+        errors, warnings = validate_config(path)
+        assert any("cpu_threshold" in e for e in errors)
+
+    def test_negative_poll_interval_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "poll_interval_seconds: -5\n")
+        errors, warnings = validate_config(path)
+        assert any("poll_interval_seconds" in e for e in errors)
+
+    def test_zero_consecutive_breaches_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "consecutive_breaches_required: 0\n")
+        errors, warnings = validate_config(path)
+        assert any("consecutive_breaches_required" in e for e in errors)
+
+    def test_nonexistent_disk_path_is_a_warning(self, tmp_path):
+        path = self._write(tmp_path, "disk_path: /this/path/should/not/exist/anywhere\n")
+        errors, warnings = validate_config(path)
+        assert errors == []
+        assert any("disk_path" in w for w in warnings)
+
+    def test_restart_service_not_in_watched_services_is_a_warning(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "watched_services: [nginx]\n"
+            "remediation_allowlist:\n  restart_services: [postgresql]\n",
+        )
+        errors, warnings = validate_config(path)
+        assert errors == []
+        assert any("postgresql" in w for w in warnings)
+
+    def test_restart_service_in_watched_services_has_no_warning(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "watched_services: [nginx]\n"
+            "remediation_allowlist:\n  restart_services: [nginx]\n",
+        )
+        errors, warnings = validate_config(path)
+        assert not any("nginx" in w for w in warnings)
+
+    def test_clean_log_dirs_must_be_list_of_strings(self, tmp_path):
+        path = self._write(
+            tmp_path, "remediation_allowlist:\n  clean_log_dirs: [123]\n"
+        )
+        errors, warnings = validate_config(path)
+        assert any("clean_log_dirs" in e for e in errors)
+
+    def test_negative_max_log_age_days_is_an_error(self, tmp_path):
+        path = self._write(
+            tmp_path, "remediation_allowlist:\n  max_log_age_days: -1\n"
+        )
+        errors, warnings = validate_config(path)
+        assert any("max_log_age_days" in e for e in errors)
+
+    def test_auto_remediate_with_empty_allowlist_is_a_warning(self, tmp_path):
+        path = self._write(tmp_path, "auto_remediate: true\n")
+        errors, warnings = validate_config(path)
+        assert any("never do anything" in w for w in warnings)
+
+    def test_auto_remediate_with_populated_allowlist_has_no_such_warning(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "auto_remediate: true\nwatched_services: [nginx]\n"
+            "remediation_allowlist:\n  restart_services: [nginx]\n",
+        )
+        errors, warnings = validate_config(path)
+        assert not any("never do anything" in w for w in warnings)
+
+    def test_watched_services_wrong_type_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "watched_services: nginx\n")  # should be a list
+        errors, warnings = validate_config(path)
+        assert any("watched_services" in e for e in errors)
+
+    def test_cli_validate_config_exit_code_and_output(self, tmp_path, monkeypatch, capsys):
+        import monitor.watchdog as wd
+        path = self._write(tmp_path, "cpu_threshold: 150\nunexpected_key: 1\n")
+        monkeypatch.setattr(sys, "argv", ["watchdog.py", "--config", path, "--validate-config"])
+        with pytest_raises_systemexit() as exc:
+            wd.main()
+        assert exc.code == 1
+        out = capsys.readouterr().out
+        assert "ERROR" in out
+        assert "WARNING" in out
+
+    def test_cli_validate_config_without_config_flag_exits_nonzero(self, monkeypatch):
+        import monitor.watchdog as wd
+        monkeypatch.setattr(sys, "argv", ["watchdog.py", "--validate-config"])
+        with pytest_raises_systemexit() as exc:
+            wd.main()
+        assert exc.code == 1
+
+    def test_cli_validate_config_success_prints_resolved_config(self, tmp_path, monkeypatch, capsys):
+        import monitor.watchdog as wd
+        path = self._write(tmp_path, "cpu_threshold: 70\n")
+        monkeypatch.setattr(sys, "argv", ["watchdog.py", "--config", path, "--validate-config"])
+        with pytest_raises_systemexit() as exc:
+            wd.main()
+        assert exc.code == 0
+        out = capsys.readouterr().out
+        assert "Resolved config" in out
+        assert "cpu_threshold: 70" in out
+
+
+def pytest_raises_systemexit():
+    """Small local helper standing in for `pytest.raises(SystemExit)` so
+    this file works the same under real pytest and under the sandbox's
+    manual test harness (see manual_harness.py), which doesn't implement
+    pytest.raises."""
+    class _Ctx:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            if exc_type is None:
+                raise AssertionError("SystemExit was not raised")
+            if not issubclass(exc_type, SystemExit):
+                return False
+            self.code = exc.code
+            return True
+
+    return _Ctx()
 
 
 class TestMetricsBreaches:
@@ -697,6 +861,88 @@ class TestIncidentDB:
         assert results[0]["report_file"] == "r1.md"
 
 
+class TestIncidentDBExport:
+
+    def _sample_results(self):
+        import monitor.incident_db as idb
+        return [
+            {
+                "timestamp": "t1", "severity": "P0", "category": "service",
+                "root_cause": "nginx worker processes exited", "report_file": "r1.md",
+                "auto_remediated": 1,
+            },
+            {
+                "timestamp": "t2", "severity": "P1", "category": "disk",
+                "root_cause": "disk filled up", "report_file": "r2.md",
+                "auto_remediated": 0,
+            },
+        ], idb
+
+    def test_format_text_matches_original_output(self):
+        results, idb = self._sample_results()
+        out = idb.format_results(results, fmt="text")
+        assert "[P0] t1 (service) - nginx worker processes exited" in out
+        assert "    report: r1.md" in out
+        assert "[P1] t2 (disk) - disk filled up" in out
+
+    def test_format_text_empty_results(self):
+        _, idb = self._sample_results()
+        assert idb.format_results([], fmt="text") == "No matching incidents found."
+
+    def test_format_json_round_trips(self):
+        import json
+        results, idb = self._sample_results()
+        out = idb.format_results(results, fmt="json")
+        parsed = json.loads(out)
+        assert parsed == results
+
+    def test_format_json_empty_results_is_empty_array(self):
+        import json
+        _, idb = self._sample_results()
+        assert json.loads(idb.format_results([], fmt="json")) == []
+
+    def test_format_csv_has_header_and_rows(self):
+        import csv
+        import io
+        results, idb = self._sample_results()
+        out = idb.format_results(results, fmt="csv")
+        rows = list(csv.DictReader(io.StringIO(out)))
+        assert len(rows) == 2
+        assert rows[0]["report_file"] == "r1.md"
+        assert rows[0]["severity"] == "P0"
+        assert rows[1]["root_cause"] == "disk filled up"
+
+    def test_format_csv_empty_results_has_only_header(self):
+        import csv
+        import io
+        _, idb = self._sample_results()
+        out = idb.format_results([], fmt="csv")
+        rows = list(csv.DictReader(io.StringIO(out)))
+        assert rows == []
+        assert "severity" in out
+
+    def test_cli_search_json_end_to_end(self, tmp_path, monkeypatch, capsys):
+        import json
+        import monitor.incident_db as idb
+        history = tmp_path / "history.jsonl"
+        history.write_text(
+            '{"timestamp": "t1", "severity": "P0", "category": "service", '
+            '"root_cause": "nginx worker processes exited", '
+            '"auto_remediated": true, "report_file": "r1.md"}\n'
+        )
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", history)
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        monkeypatch.setattr(sys, "argv", ["incident_db.py", "--sync", "--search", "nginx", "--format", "json"])
+        idb.main()
+        out = capsys.readouterr().out
+        # Last JSON-looking line onward should parse; find the array start.
+        start = out.index("[")
+        parsed = json.loads(out[start:])
+        assert len(parsed) == 1
+        assert parsed[0]["report_file"] == "r1.md"
+
+
 # ---------------------------------------------------------------------------
 # Time-of-day-aware baseline (adaptive thresholds)
 # ---------------------------------------------------------------------------
@@ -928,3 +1174,50 @@ class TestDashboardSearch:
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stderr
         assert "ok" in result.stdout
+
+
+class TestDashboardTrend:
+
+    def test_trend_svg_shows_empty_message_when_no_dated_records(self):
+        out = trend_svg([])
+        assert "No incidents in the last" in out
+
+    def test_trend_svg_renders_line_and_area_for_dated_records(self):
+        from datetime import datetime
+        today = datetime.now().date().isoformat()
+        records = [
+            {"timestamp": f"{today}T10:00:00Z", "severity": "P1"},
+            {"timestamp": f"{today}T11:00:00Z", "severity": "P1"},
+        ]
+        out = trend_svg(records)
+        assert "<path" in out
+        assert "No incidents in the last" not in out
+        assert "max 2/day" in out
+
+    def test_trend_svg_groups_by_day_across_multiple_timestamps_same_day(self):
+        from datetime import datetime
+        today = datetime.now().date().isoformat()
+        records = [{"timestamp": f"{today}T0{h}:00:00Z", "severity": "P2"} for h in range(3)]
+        out = trend_svg(records)
+        assert "max 3/day" in out
+
+    def test_trend_svg_ignores_records_outside_the_window(self):
+        records = [{"timestamp": "2000-01-01T00:00:00Z", "severity": "P3"}]
+        out = trend_svg(records, days=14)
+        assert "No incidents in the last 14 days" in out
+
+    def test_trend_svg_handles_unparseable_timestamps_gracefully(self):
+        records = [{"timestamp": "not-a-real-timestamp", "severity": "P2"}]
+        out = trend_svg(records)  # must not raise
+        assert "<svg" in out
+
+    def test_incident_date_parses_iso_and_prefix_forms(self):
+        from monitor.dashboard import _incident_date
+        assert _incident_date("2026-05-01T12:00:00Z") == "2026-05-01"
+        assert _incident_date("2026-05-01 something odd") == "2026-05-01"
+        assert _incident_date("") is None
+        assert _incident_date("garbage") is None
+
+    def test_trend_panel_present_in_rendered_html(self):
+        out = render_html([])
+        assert "Incidents per Day" in out

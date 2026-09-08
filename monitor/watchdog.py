@@ -21,6 +21,7 @@ Usage:
     python -m monitor.watchdog --dry-run               # preview what auto-remediation would do
     python -m monitor.watchdog --auto-remediate        # opt in to safe auto-fixes
     python -m monitor.watchdog --config monitor/watchdog_config.yaml
+    python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
     python -m monitor.watchdog --metrics-port 9877      # also serve Prometheus /metrics
 
 See SAFETY.md for the full threat model of --auto-remediate.
@@ -29,6 +30,7 @@ See SAFETY.md for the full threat model of --auto-remediate.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import subprocess
@@ -102,6 +104,121 @@ class WatchdogConfig:
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
         return cfg
+
+
+def validate_config(path: str) -> tuple[list[str], list[str]]:
+    """Checks a watchdog config YAML file for typos and invalid allow-list
+    entries without starting the watchdog. Returns (errors, warnings) -
+    errors mean the config can't be used safely as-is, warnings are things
+    worth a second look but won't stop the watchdog from running.
+
+    Kept as a pure function (no printing, no sys.exit) so it can be tested
+    directly and reused by anything other than the CLI later."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if not YAML_AVAILABLE:
+        errors.append("pyyaml is required to validate a config file (`pip install pyyaml`)")
+        return errors, warnings
+
+    if not os.path.isfile(path):
+        errors.append(f"Config file not found: {path}")
+        return errors, warnings
+
+    try:
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        errors.append(f"Invalid YAML syntax: {exc}")
+        return errors, warnings
+
+    if not isinstance(raw, dict):
+        errors.append("Config file must contain a YAML mapping (key: value pairs) at the top level")
+        return errors, warnings
+
+    known_fields = {f.name for f in dataclasses.fields(WatchdogConfig)}
+    for key in raw:
+        if key not in known_fields:
+            warnings.append(f"Unknown key '{key}' - not a recognized setting (typo?), it will be ignored")
+
+    cfg = WatchdogConfig.from_file(path)
+
+    for name in ("cpu_threshold", "mem_threshold", "disk_threshold"):
+        value = getattr(cfg, name)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"'{name}' must be a number, got {value!r}")
+        elif not (0 <= value <= 100):
+            errors.append(f"'{name}' should be between 0 and 100, got {value}")
+
+    if not isinstance(cfg.poll_interval_seconds, int) or isinstance(cfg.poll_interval_seconds, bool) \
+            or cfg.poll_interval_seconds <= 0:
+        errors.append(f"'poll_interval_seconds' must be a positive integer, got {cfg.poll_interval_seconds!r}")
+
+    if not isinstance(cfg.consecutive_breaches_required, int) or isinstance(cfg.consecutive_breaches_required, bool) \
+            or cfg.consecutive_breaches_required < 1:
+        errors.append(
+            f"'consecutive_breaches_required' must be an integer >= 1, got {cfg.consecutive_breaches_required!r}"
+        )
+
+    if not isinstance(cfg.cooldown_minutes, int) or isinstance(cfg.cooldown_minutes, bool) \
+            or cfg.cooldown_minutes < 0:
+        errors.append(f"'cooldown_minutes' must be an integer >= 0, got {cfg.cooldown_minutes!r}")
+
+    if not isinstance(cfg.disk_path, str) or not cfg.disk_path:
+        errors.append(f"'disk_path' must be a non-empty string, got {cfg.disk_path!r}")
+    elif not os.path.exists(cfg.disk_path):
+        warnings.append(f"'disk_path' ({cfg.disk_path}) does not exist on this host")
+
+    if not isinstance(cfg.watched_services, list) or not all(isinstance(s, str) for s in cfg.watched_services):
+        errors.append("'watched_services' must be a list of strings")
+
+    if not isinstance(cfg.remediation_allowlist, dict):
+        errors.append("'remediation_allowlist' must be a mapping")
+    else:
+        restart_services = cfg.remediation_allowlist.get("restart_services", [])
+        clean_log_dirs = cfg.remediation_allowlist.get("clean_log_dirs", [])
+        max_log_age_days = cfg.remediation_allowlist.get("max_log_age_days", 14)
+
+        if not isinstance(restart_services, list) or not all(isinstance(s, str) for s in restart_services):
+            errors.append("'remediation_allowlist.restart_services' must be a list of strings")
+        elif isinstance(cfg.watched_services, list):
+            watched = set(cfg.watched_services)
+            for svc in restart_services:
+                if svc not in watched:
+                    warnings.append(
+                        f"'{svc}' is allow-listed to restart but not in 'watched_services' - "
+                        "the watchdog won't detect it as failing, so this entry has no effect"
+                    )
+
+        if not isinstance(clean_log_dirs, list) or not all(isinstance(d, str) for d in clean_log_dirs):
+            errors.append("'remediation_allowlist.clean_log_dirs' must be a list of strings")
+        else:
+            for d in clean_log_dirs:
+                if not os.path.isdir(d):
+                    warnings.append(f"'remediation_allowlist.clean_log_dirs' entry '{d}' does not exist on this host")
+
+        if not isinstance(max_log_age_days, int) or isinstance(max_log_age_days, bool) or max_log_age_days < 0:
+            errors.append(
+                f"'remediation_allowlist.max_log_age_days' must be an integer >= 0, got {max_log_age_days!r}"
+            )
+
+    if cfg.auto_remediate and not isinstance(cfg.auto_remediate, bool):
+        errors.append(f"'auto_remediate' must be a boolean, got {cfg.auto_remediate!r}")
+    if not isinstance(cfg.model, str) or not cfg.model:
+        errors.append(f"'model' must be a non-empty string, got {cfg.model!r}")
+
+    if cfg.auto_remediate and not restart_services_and_clean_dirs_present(cfg):
+        warnings.append(
+            "'auto_remediate' is enabled but the allow-list has no 'restart_services' or "
+            "'clean_log_dirs' entries - auto-remediation will never do anything"
+        )
+
+    return errors, warnings
+
+
+def restart_services_and_clean_dirs_present(cfg: WatchdogConfig) -> bool:
+    allowlist = cfg.remediation_allowlist if isinstance(cfg.remediation_allowlist, dict) else {}
+    return bool(allowlist.get("restart_services")) or bool(allowlist.get("clean_log_dirs"))
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +715,11 @@ def main() -> None:
         "--show-baseline", action="store_true",
         help="Print the learned per-hour-of-day baseline (cpu/mem/disk) and exit",
     )
+    parser.add_argument(
+        "--validate-config", action="store_true",
+        help="Check the file passed to --config for typos and invalid allow-list entries, "
+             "print what it would resolve to, and exit without starting the watchdog",
+    )
     parser.add_argument("--cpu-threshold", type=float, default=None)
     parser.add_argument("--mem-threshold", type=float, default=None)
     parser.add_argument("--disk-threshold", type=float, default=None)
@@ -617,6 +739,24 @@ def main() -> None:
                 trust = "trusted" if stats["trusted"] else "not enough data yet"
                 print(f"  {int(hour_key):02d}:00  n={stats['n']:<4} mean={stats['mean']:<6} stddev={stats['stddev']:<6} ({trust})")
         return
+
+    if args.validate_config:
+        if not args.config:
+            print("Error: --validate-config requires --config PATH", file=sys.stderr)
+            sys.exit(1)
+        errors, warnings = validate_config(args.config)
+        if not errors and not warnings:
+            print(f"{args.config}: OK, no issues found.")
+        for w in warnings:
+            print(f"WARNING: {w}")
+        for e in errors:
+            print(f"ERROR: {e}")
+        if not errors:
+            cfg = WatchdogConfig.from_file(args.config)
+            print("\nResolved config:")
+            for f in dataclasses.fields(WatchdogConfig):
+                print(f"  {f.name}: {getattr(cfg, f.name)!r}")
+        sys.exit(1 if errors else 0)
 
     cfg = WatchdogConfig.from_file(args.config) if args.config else WatchdogConfig()
     if args.auto_remediate:
