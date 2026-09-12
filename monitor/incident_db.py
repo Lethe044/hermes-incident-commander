@@ -20,6 +20,8 @@ Usage:
     python -m monitor.incident_db --search "disk full" --limit 5
     python -m monitor.incident_db --search "nginx" --format json
     python -m monitor.incident_db --search "nginx" --format csv > incidents.csv
+    python -m monitor.incident_db --stats              # summary: counts, rate, busiest category
+    python -m monitor.incident_db --stats --format json
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import csv
 import io
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -77,9 +80,16 @@ END;
 """
 
 
-def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
+def get_connection(db_path: Path | None = None) -> sqlite3.Connection:
     """Opens (creating if needed) the incidents database and ensures the
-    schema exists."""
+    schema exists.
+
+    `db_path` defaults to the *current* value of `DB_PATH` (resolved each
+    call, not bound at import time) so tests can monkeypatch
+    `incident_db.DB_PATH` and have it actually take effect; a
+    `Path = DB_PATH` default argument would silently ignore that patch and
+    keep connecting to the original path."""
+    db_path = db_path if db_path is not None else DB_PATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path))
     conn.executescript(_BASE_SCHEMA)
@@ -247,6 +257,130 @@ def format_results(results: list[dict[str, Any]], fmt: str = "text") -> str:
     return "\n".join(lines)
 
 
+def _parse_ts(ts: str) -> datetime | None:
+    """Parses an incident timestamp into an aware UTC datetime for age
+    calculations. Timestamps come from more than one source (the
+    watchdog's own ISO-8601 output, hand-parsed markdown reports) so this
+    tolerates both naive and 'Z'-suffixed forms, and returns None rather
+    than raising on anything it can't parse."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def compute_stats(conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Aggregates the incidents table into summary stats: totals, a
+    breakdown by severity and category, the auto-remediation rate, how
+    many incidents happened in the last 7/30 days, and the busiest
+    category - so "how are we doing" doesn't require eyeballing raw
+    search results."""
+    own_conn = conn is None
+    conn = conn or get_connection()
+    conn.row_factory = sqlite3.Row
+
+    total = conn.execute("SELECT COUNT(*) AS n FROM incidents").fetchone()["n"]
+
+    by_severity: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(NULLIF(severity, ''), 'unknown') AS severity, COUNT(*) AS n "
+        "FROM incidents GROUP BY severity"
+    ):
+        by_severity[row["severity"]] = row["n"]
+
+    by_category: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(NULLIF(category, ''), 'unknown') AS category, COUNT(*) AS n "
+        "FROM incidents GROUP BY category"
+    ):
+        by_category[row["category"]] = row["n"]
+
+    auto_remediated = conn.execute(
+        "SELECT COUNT(*) AS n FROM incidents WHERE auto_remediated = 1"
+    ).fetchone()["n"]
+
+    most_recent_row = conn.execute(
+        "SELECT timestamp FROM incidents WHERE timestamp IS NOT NULL AND timestamp != '' "
+        "ORDER BY timestamp DESC LIMIT 1"
+    ).fetchone()
+    most_recent = most_recent_row["timestamp"] if most_recent_row else None
+
+    # Computed in Python rather than with SQLite's date() functions, since
+    # timestamps aren't guaranteed to all be in a format SQLite understands.
+    now = datetime.now(timezone.utc)
+    last_7_days = last_30_days = 0
+    for row in conn.execute("SELECT timestamp FROM incidents"):
+        dt = _parse_ts(row["timestamp"])
+        if dt is None:
+            continue
+        age_days = (now - dt).total_seconds() / 86400
+        if age_days <= 7:
+            last_7_days += 1
+        if age_days <= 30:
+            last_30_days += 1
+
+    top_category = max(by_category, key=by_category.get) if by_category else None
+
+    result = {
+        "total": total,
+        "by_severity": by_severity,
+        "by_category": by_category,
+        "auto_remediated": auto_remediated,
+        "auto_remediated_rate": round(auto_remediated / total, 3) if total else 0.0,
+        "last_7_days": last_7_days,
+        "last_30_days": last_30_days,
+        "most_recent_timestamp": most_recent,
+        "top_category": top_category,
+    }
+    if own_conn:
+        conn.close()
+    return result
+
+
+_SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def format_stats(stats: dict[str, Any], fmt: str = "text") -> str:
+    """Renders compute_stats() output as `text` (a short human-readable
+    summary) or `json` (the raw dict) - mirrors format_results()'s output
+    contract so --search and --stats behave consistently."""
+    if fmt == "json":
+        return json.dumps(stats, indent=2)
+
+    if stats["total"] == 0:
+        return "No incidents recorded yet. Run --sync after the watchdog has written some history."
+
+    lines = [
+        f"Total incidents: {stats['total']}",
+        f"Auto-remediated: {stats['auto_remediated']} ({stats['auto_remediated_rate'] * 100:.1f}%)",
+        f"Last 7 days: {stats['last_7_days']}   Last 30 days: {stats['last_30_days']}",
+    ]
+    if stats["most_recent_timestamp"]:
+        lines.append(f"Most recent: {stats['most_recent_timestamp']}")
+    if stats["top_category"]:
+        lines.append(
+            f"Busiest category: {stats['top_category']} "
+            f"({stats['by_category'][stats['top_category']]} incident(s))"
+        )
+
+    lines.append("")
+    lines.append("By severity:")
+    for sev in sorted(stats["by_severity"], key=lambda s: (_SEVERITY_ORDER.get(s, 99), s)):
+        lines.append(f"  {sev}: {stats['by_severity'][sev]}")
+
+    lines.append("")
+    lines.append("By category:")
+    for cat, n in sorted(stats["by_category"].items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"  {cat}: {n}")
+
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Hermes Incident Commander - local incident search (SQLite, no server)"
@@ -255,13 +389,18 @@ def main() -> None:
     parser.add_argument("--search", metavar="QUERY", help="Search past incidents")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument(
+        "--stats", action="store_true",
+        help="Print summary stats (totals, by severity/category, auto-remediation rate, "
+             "last 7/30 days, busiest category)",
+    )
+    parser.add_argument(
         "--format", choices=["text", "json", "csv"], default="text",
-        help="Output format for --search results (default: text). "
-             "json/csv are meant to be piped into a report or another tool.",
+        help="Output format for --search/--stats results (default: text; csv only applies "
+             "to --search). json/csv are meant to be piped into a report or another tool.",
     )
     args = parser.parse_args()
 
-    if not args.sync and not args.search:
+    if not args.sync and not args.search and not args.stats:
         parser.print_help()
         return
 
@@ -276,6 +415,10 @@ def main() -> None:
             output = format_results(results, fmt=args.format)
             if output:
                 print(output)
+
+        if args.stats:
+            fmt = "json" if args.format == "json" else "text"
+            print(format_stats(compute_stats(conn), fmt=fmt))
     finally:
         conn.close()
 

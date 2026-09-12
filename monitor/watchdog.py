@@ -221,6 +221,49 @@ def restart_services_and_clean_dirs_present(cfg: WatchdogConfig) -> bool:
     return bool(allowlist.get("restart_services")) or bool(allowlist.get("clean_log_dirs"))
 
 
+def suggest_threshold(category: str, cfg: WatchdogConfig) -> dict[str, Any] | None:
+    """For a numeric-threshold category (cpu/mem/disk) that's flapping,
+    suggests a concrete new threshold instead of just repeating the
+    warning. Prefers a learned per-hour baseline (monitor/baseline.py,
+    same math as --adaptive-thresholds) when trusted data exists for the
+    current hour; otherwise falls back to a conservative static bump so
+    there's still an actionable number even with no history yet. Returns
+    None for non-numeric categories (e.g. 'service', 'network') where
+    there's no single threshold to change."""
+    if category not in ("cpu", "mem", "disk"):
+        return None
+    threshold_attr = f"{category}_threshold"
+    current = getattr(cfg, threshold_attr, None)
+    if not isinstance(current, (int, float)) or isinstance(current, bool):
+        return None
+
+    try:
+        from monitor import baseline
+        hour = datetime.now(timezone.utc).hour
+        adaptive = baseline.get_adaptive_threshold(category, hour, current)
+        if adaptive > current:
+            return {
+                "metric": category,
+                "current_threshold": current,
+                "suggested_threshold": round(adaptive, 1),
+                "source": "baseline",
+            }
+    except Exception:
+        pass
+
+    # No trusted baseline yet - a conservative static bump, capped at 98,
+    # so the suggestion is never itself an unreasonable "never alert" value.
+    bumped = min(current + 5, 98.0)
+    if bumped <= current:
+        return None
+    return {
+        "metric": category,
+        "current_threshold": current,
+        "suggested_threshold": bumped,
+        "source": "static-bump",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Metric collection (real, read-only - no shell exec required)
 # ---------------------------------------------------------------------------
@@ -493,7 +536,13 @@ def _record_open_incident(breached_keys: list[str], open_incidents: dict[str, st
 # Reporting
 # ---------------------------------------------------------------------------
 
-def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_actions: list[str]) -> Path:
+def write_incident(
+    metrics: Metrics,
+    diagnosis: dict[str, Any],
+    performed_actions: list[str],
+    flap_info: dict[str, Any] | None = None,
+    cfg: WatchdogConfig | None = None,
+) -> Path:
     INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     category = diagnosis.get("category", "unknown")
@@ -501,12 +550,16 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
     report_path = INCIDENT_DIR / f"{slug}.md"
 
     # Best-effort flapping check: never let this block writing the report.
-    flap_info: dict[str, Any] = {"is_flapping": False, "count": 1, "window_minutes": 0}
-    try:
-        from monitor import flapping
-        flap_info = flapping.record_and_check(category, metrics.timestamp)
-    except Exception:
-        pass
+    # A caller that already ran flapping.record_and_check() for this same
+    # incident (run_once does, so it can also throttle notifications) can
+    # pass the result in via `flap_info` instead of it being recorded twice.
+    if flap_info is None:
+        flap_info = {"is_flapping": False, "count": 1, "window_minutes": 0, "flap_threshold": 3}
+        try:
+            from monitor import flapping
+            flap_info = flapping.record_and_check(category, metrics.timestamp)
+        except Exception:
+            pass
 
     def _ordinal(n: int) -> str:
         if 10 <= n % 100 <= 20:
@@ -517,13 +570,27 @@ def write_incident(metrics: Metrics, diagnosis: dict[str, Any], performed_action
 
     body = diagnosis.get("report_markdown", "").strip()
     if flap_info["is_flapping"]:
+        suggestion_line = ""
+        if cfg is not None:
+            suggestion = suggest_threshold(category, cfg)
+            if suggestion is not None:
+                basis = (
+                    "your observed load at this hour" if suggestion["source"] == "baseline"
+                    else "a conservative bump - not enough baseline history yet to be more precise"
+                )
+                suggestion_line = (
+                    f"> 💡 **Suggested fix**: raise `{suggestion['metric']}_threshold` from "
+                    f"{suggestion['current_threshold']:g} to {suggestion['suggested_threshold']:g} "
+                    f"in your config ({basis}), or enable `--adaptive-thresholds` so this "
+                    f"adjusts automatically.\n\n"
+                )
         body = (
             f"> ⚠️ **FLAPPING DETECTED**: this is the {_ordinal(flap_info['count'])} `{category}` "
             f"incident in the last {flap_info['window_minutes']} minutes. This usually means "
             f"either the root cause isn't actually being fixed, or the threshold for this "
             f"metric is tuned too tight for normal load (see `--adaptive-thresholds` in "
             f"README.md).\n\n"
-        ) + body
+        ) + suggestion_line + body
     if performed_actions:
         body += "\n\n## Auto-Remediation Performed\n" + "\n".join(f"- {a}" for a in performed_actions)
     else:
@@ -594,7 +661,18 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     severity = diagnosis.get("severity", "P2")
 
     performed = safe_remediate(diagnosis, cfg, dry_run=dry_run)
-    report_path = write_incident(metrics, diagnosis, performed)
+
+    # Computed once here (rather than inside write_incident) so both the
+    # report text and the notification-throttling decision below see the
+    # exact same count for this incident.
+    flap_info = {"is_flapping": False, "count": 1, "window_minutes": 0, "flap_threshold": 3}
+    try:
+        from monitor import flapping
+        flap_info = flapping.record_and_check(diagnosis.get("category", "unknown"), metrics.timestamp)
+    except Exception:
+        pass
+
+    report_path = write_incident(metrics, diagnosis, performed, flap_info=flap_info, cfg=cfg)
 
     if dry_run:
         # Don't page anyone or open a PagerDuty incident for a test run - just
@@ -609,7 +687,15 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     breached_keys = sorted(k for k, v in breaches.items() if v)
     dedup_key = _record_open_incident(breached_keys, open_incidents)
 
-    if notifier.configured:
+    # Once a category has already crossed the flapping threshold and been
+    # alerted on once, don't re-page for every additional repeat within the
+    # same window - the report and history.jsonl still record every
+    # occurrence, only the outbound notification is throttled.
+    already_alerted_for_this_flap = (
+        flap_info["is_flapping"] and flap_info["count"] > flap_info["flap_threshold"]
+    )
+
+    if notifier.configured and not already_alerted_for_this_flap:
         notifier.send_alert(
             severity=severity,
             title_text=diagnosis.get("category", "incident"),
@@ -619,6 +705,12 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
                 + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
             ),
             dedup_key=dedup_key,
+        )
+    elif notifier.configured and not quiet:
+        print(
+            f"  -> Notification suppressed (still flapping: {flap_info['count']} "
+            f"'{diagnosis.get('category', 'unknown')}' incidents in the last "
+            f"{flap_info['window_minutes']} min, already alerted once - see report)"
         )
 
     return report_path

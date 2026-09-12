@@ -14,12 +14,13 @@ from __future__ import annotations
 import json
 import sys
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from monitor.dashboard import bar_svg, load_from_jsonl, render_html, trend_svg
+from monitor.dashboard import bar_svg, category_svg, load_from_jsonl, render_html, trend_svg
 from monitor.notifier import Notifier
 from monitor.watchdog import (
     Metrics,
@@ -27,6 +28,7 @@ from monitor.watchdog import (
     _clean_old_files,
     run_once,
     safe_remediate,
+    suggest_threshold,
     validate_config,
     write_incident,
 )
@@ -462,6 +464,59 @@ def pytest_raises_systemexit():
     return _Ctx()
 
 
+class TestSuggestThreshold:
+
+    def test_non_numeric_category_returns_none(self):
+        cfg = WatchdogConfig()
+        assert suggest_threshold("service", cfg) is None
+        assert suggest_threshold("network", cfg) is None
+
+    def test_no_baseline_data_falls_back_to_static_bump(self, tmp_path, monkeypatch):
+        import monitor.baseline as baseline_mod
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+        cfg = WatchdogConfig(cpu_threshold=90.0)
+        suggestion = suggest_threshold("cpu", cfg)
+        assert suggestion is not None
+        assert suggestion["source"] == "static-bump"
+        assert suggestion["current_threshold"] == 90.0
+        assert suggestion["suggested_threshold"] == 95.0
+
+    def test_static_bump_is_capped_at_98(self, tmp_path, monkeypatch):
+        import monitor.baseline as baseline_mod
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+        cfg = WatchdogConfig(cpu_threshold=96.0)
+        suggestion = suggest_threshold("cpu", cfg)
+        assert suggestion["suggested_threshold"] == 98.0
+
+    def test_bump_that_would_not_increase_returns_none(self, tmp_path, monkeypatch):
+        import monitor.baseline as baseline_mod
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+        cfg = WatchdogConfig(cpu_threshold=98.0)
+        assert suggest_threshold("cpu", cfg) is None
+
+    def test_trusted_baseline_data_is_preferred_over_static_bump(self, tmp_path, monkeypatch):
+        import monitor.baseline as baseline_mod
+        baseline_path = tmp_path / "baseline.json"
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", baseline_path)
+        # Feed enough samples for this hour to be "trusted".
+        hour = 5
+        for v in [70.0] * 25:
+            baseline_mod.update_baseline({"cpu": v}, hour, path=baseline_path)
+
+        cfg = WatchdogConfig(cpu_threshold=60.0)  # static threshold well below observed load
+        with patch("monitor.watchdog.datetime") as mock_dt:
+            mock_dt.now.return_value.hour = hour
+            suggestion = suggest_threshold("cpu", cfg)
+        assert suggestion is not None
+        assert suggestion["source"] == "baseline"
+        assert suggestion["suggested_threshold"] > cfg.cpu_threshold
+
+    def test_missing_threshold_attribute_returns_none(self):
+        class FakeCfg:
+            pass
+        assert suggest_threshold("cpu", FakeCfg()) is None
+
+
 class TestMetricsBreaches:
 
     def test_breach_detection(self):
@@ -617,6 +672,17 @@ class TestRunOnceAndPagerDutyResolve:
         monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
         monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
         monkeypatch.setattr(wd, "OPEN_INCIDENTS_FILE", tmp_path / "open_pagerduty_incidents.json")
+        # write_incident() also calls into monitor.flapping (always) and
+        # monitor.incident_db (to keep the search index in sync) - these
+        # are separate modules with their own home-directory-derived
+        # globals, so they need to be isolated to tmp_path too or a real
+        # breach in these tests would write into the real ~/.hermes/incidents.
+        import monitor.flapping as flapping_mod
+        import monitor.incident_db as idb
+        monkeypatch.setattr(flapping_mod, "FREQUENCY_FILE", tmp_path / "incident_frequency.json")
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
         return wd
 
     def test_dry_run_writes_report_but_sends_no_notification(self, tmp_path, monkeypatch):
@@ -677,6 +743,64 @@ class TestRunOnceAndPagerDutyResolve:
 
         # still cleared locally even without a PagerDuty key to notify
         assert json.loads(wd.OPEN_INCIDENTS_FILE.read_text()) == {}
+
+    def test_first_flap_crossing_still_notifies(self, tmp_path, monkeypatch):
+        """The occurrence that first reaches flap_threshold should still
+        alert (it's new information - "this just started flapping") -
+        only occurrences *after* that get throttled."""
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(timestamp="t1", cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[])
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check, \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 3, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": True,
+            }
+            wd.run_once(WatchdogConfig(), notifier, quiet=True)
+
+        mock_send_alert.assert_called_once()
+
+    def test_repeat_flap_beyond_threshold_suppresses_notification(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(timestamp="t1", cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[])
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check, \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 5, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": True,
+            }
+            report = wd.run_once(WatchdogConfig(), notifier, quiet=True)
+
+        mock_send_alert.assert_not_called()
+        # the report and dedup bookkeeping still happen - only the outbound
+        # notification is throttled
+        assert report is not None and report.exists()
+        assert json.loads(wd.OPEN_INCIDENTS_FILE.read_text()) == {"cpu": "hermes-ic-cpu"}
+
+    def test_non_flapping_breach_always_notifies(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(timestamp="t1", cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[])
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check, \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 1, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": False,
+            }
+            wd.run_once(WatchdogConfig(), notifier, quiet=True)
+
+        mock_send_alert.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -943,6 +1067,114 @@ class TestIncidentDBExport:
         assert parsed[0]["report_file"] == "r1.md"
 
 
+class TestIncidentDBStats:
+
+    def _seeded_db(self, tmp_path, monkeypatch):
+        import monitor.incident_db as idb
+        history = tmp_path / "history.jsonl"
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(days=1)).isoformat()
+        mid = (now - timedelta(days=15)).isoformat()
+        old = (now - timedelta(days=60)).isoformat()
+        lines = [
+            {"timestamp": recent, "severity": "P0", "category": "service",
+             "root_cause": "nginx down", "auto_remediated": True, "report_file": "r1.md"},
+            {"timestamp": recent, "severity": "P2", "category": "cpu",
+             "root_cause": "cron spike", "auto_remediated": False, "report_file": "r2.md"},
+            {"timestamp": mid, "severity": "P1", "category": "disk",
+             "root_cause": "log rotation disabled", "auto_remediated": True, "report_file": "r3.md"},
+            {"timestamp": old, "severity": "P2", "category": "disk",
+             "root_cause": "disk crept up", "auto_remediated": False, "report_file": "r4.md"},
+        ]
+        history.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", history)
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        conn = idb.get_connection()
+        idb.sync(conn)
+        return idb, conn
+
+    def test_compute_stats_totals_and_rate(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        stats = idb.compute_stats(conn)
+        assert stats["total"] == 4
+        assert stats["auto_remediated"] == 2
+        assert stats["auto_remediated_rate"] == 0.5
+
+    def test_compute_stats_by_severity_and_category(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        stats = idb.compute_stats(conn)
+        assert stats["by_severity"] == {"P0": 1, "P1": 1, "P2": 2}
+        assert stats["by_category"] == {"service": 1, "cpu": 1, "disk": 2}
+        assert stats["top_category"] == "disk"
+
+    def test_compute_stats_time_windows(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        stats = idb.compute_stats(conn)
+        assert stats["last_7_days"] == 2    # the two "recent" (1 day ago) entries
+        assert stats["last_30_days"] == 3   # recent x2 + mid (15 days ago)
+
+    def test_compute_stats_empty_db(self, tmp_path, monkeypatch):
+        import monitor.incident_db as idb
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "does_not_exist.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        stats = idb.compute_stats()
+        assert stats["total"] == 0
+        assert stats["auto_remediated_rate"] == 0.0
+        assert stats["top_category"] is None
+        assert stats["most_recent_timestamp"] is None
+
+    def test_format_stats_text_empty(self):
+        import monitor.incident_db as idb
+        out = idb.format_stats({
+            "total": 0, "by_severity": {}, "by_category": {}, "auto_remediated": 0,
+            "auto_remediated_rate": 0.0, "last_7_days": 0, "last_30_days": 0,
+            "most_recent_timestamp": None, "top_category": None,
+        })
+        assert "No incidents recorded yet" in out
+
+    def test_format_stats_text_includes_key_numbers(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        out = idb.format_stats(idb.compute_stats(conn))
+        assert "Total incidents: 4" in out
+        assert "50.0%" in out
+        assert "Busiest category: disk" in out
+
+    def test_format_stats_json_round_trips(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        stats = idb.compute_stats(conn)
+        out = idb.format_stats(stats, fmt="json")
+        assert json.loads(out) == stats
+
+    def test_cli_stats_text(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        conn.close()
+        monkeypatch.setattr(sys, "argv", ["incident_db.py", "--stats"])
+        idb.main()
+        out = capsys.readouterr().out
+        assert "Total incidents: 4" in out
+
+    def test_cli_stats_json(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        conn.close()
+        monkeypatch.setattr(sys, "argv", ["incident_db.py", "--stats", "--format", "json"])
+        idb.main()
+        out = capsys.readouterr().out
+        parsed = json.loads(out)
+        assert parsed["total"] == 4
+
+    def test_no_args_prints_help_and_does_not_crash(self, tmp_path, monkeypatch, capsys):
+        import monitor.incident_db as idb
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        monkeypatch.setattr(sys, "argv", ["incident_db.py"])
+        idb.main()  # must not raise
+        out = capsys.readouterr().out
+        assert "usage" in out.lower()
+
+
 # ---------------------------------------------------------------------------
 # Time-of-day-aware baseline (adaptive thresholds)
 # ---------------------------------------------------------------------------
@@ -1076,9 +1308,16 @@ class TestFlapping:
     def test_write_incident_flags_flapping_in_report_and_history(self, tmp_path, monkeypatch):
         import monitor.watchdog as wd
         import monitor.flapping as flapping_mod
+        import monitor.incident_db as idb
         monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
         monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
         monkeypatch.setattr(flapping_mod, "FREQUENCY_FILE", tmp_path / "incident_frequency.json")
+        # write_incident() also best-effort syncs monitor.incident_db, which
+        # has its own separate home-directory-derived globals - isolate
+        # those too or this test would write into the real ~/.hermes/incidents.
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
 
         diagnosis = {
             "severity": "P2", "category": "cpu",
@@ -1104,8 +1343,71 @@ class TestFlapping:
         assert records[1]["flapping"] is False
         assert records[2]["flapping"] is True
 
+    def test_flapping_report_includes_threshold_suggestion_when_cfg_given(self, tmp_path, monkeypatch):
+        import monitor.watchdog as wd
+        import monitor.flapping as flapping_mod
+        import monitor.baseline as baseline_mod
+        import monitor.incident_db as idb
+        monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(flapping_mod, "FREQUENCY_FILE", tmp_path / "incident_frequency.json")
+        monkeypatch.setattr(baseline_mod, "BASELINE_FILE", tmp_path / "baseline.json")
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+
+        diagnosis = {
+            "severity": "P2", "category": "cpu",
+            "root_cause_hypothesis": "runaway cron",
+            "recommended_actions": [], "report_markdown": "# Report",
+        }
+        cfg = WatchdogConfig(cpu_threshold=90.0)
+        timestamps = [
+            "2026-01-01T10:00:00+00:00",
+            "2026-01-01T10:15:00+00:00",
+            "2026-01-01T10:30:00+00:00",
+        ]
+        report_path = None
+        for ts in timestamps:
+            metrics = Metrics(timestamp=ts, cpu_percent=95, mem_percent=10, disk_percent=10, failed_services=[])
+            report_path = wd.write_incident(metrics, diagnosis, [], cfg=cfg)
+
+        content = report_path.read_text()
+        assert "Suggested fix" in content
+        assert "cpu_threshold" in content
+        assert "90" in content and "95" in content  # static bump: 90 -> 95
+
+    def test_flapping_report_has_no_suggestion_without_cfg(self, tmp_path, monkeypatch):
+        import monitor.watchdog as wd
+        import monitor.flapping as flapping_mod
+        import monitor.incident_db as idb
+        monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(flapping_mod, "FREQUENCY_FILE", tmp_path / "incident_frequency.json")
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", tmp_path / "history.jsonl")
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+
+        diagnosis = {
+            "severity": "P2", "category": "cpu",
+            "root_cause_hypothesis": "runaway cron",
+            "recommended_actions": [], "report_markdown": "# Report",
+        }
+        timestamps = [
+            "2026-01-01T10:00:00+00:00",
+            "2026-01-01T10:15:00+00:00",
+            "2026-01-01T10:30:00+00:00",
+        ]
+        report_path = None
+        for ts in timestamps:
+            metrics = Metrics(timestamp=ts, cpu_percent=95, mem_percent=10, disk_percent=10, failed_services=[])
+            report_path = wd.write_incident(metrics, diagnosis, [])  # no cfg passed
+
+        content = report_path.read_text()
+        assert "FLAPPING DETECTED" in content
+        assert "Suggested fix" not in content
+
     def test_ordinal_suffixes(self):
-        # Exercises the same suffix rules used in write_incident's report text.
         def ordinal(n):
             if 10 <= n % 100 <= 20:
                 return f"{n}th"
@@ -1221,3 +1523,56 @@ class TestDashboardTrend:
     def test_trend_panel_present_in_rendered_html(self):
         out = render_html([])
         assert "Incidents per Day" in out
+
+
+class TestDashboardCategoryChart:
+
+    def test_empty_records_shows_placeholder(self):
+        out = category_svg([])
+        assert "No incidents yet" in out
+
+    def test_bars_rendered_for_each_category(self):
+        records = [
+            {"category": "cpu"}, {"category": "cpu"}, {"category": "disk"},
+        ]
+        out = category_svg(records)
+        assert out.count("<rect") == 2  # one bar per distinct category
+        assert "cpu" in out
+        assert "disk" in out
+
+    def test_missing_category_falls_back_to_unknown(self):
+        records = [{"category": None}, {}]
+        out = category_svg(records)
+        assert "unknown" in out
+
+    def test_categories_sorted_by_count_descending(self):
+        records = (
+            [{"category": "disk"}] * 5
+            + [{"category": "cpu"}] * 2
+            + [{"category": "network"}] * 1
+        )
+        out = category_svg(records)
+        # the widest (most frequent) bar's label should appear before the others
+        assert out.index(">disk<") < out.index(">cpu<") < out.index(">network<")
+
+    def test_long_category_name_is_truncated_with_ellipsis(self):
+        records = [{"category": "a-very-long-category-name-indeed"}]
+        out = category_svg(records)
+        assert "\u2026" in out
+
+    def test_more_than_max_categories_shows_remainder_footer(self):
+        records = [{"category": f"cat{i}"} for i in range(12)]
+        out = category_svg(records, max_categories=8)
+        assert out.count("<rect") == 8
+        assert "more categor" in out
+
+    def test_valid_svg_xml(self):
+        import xml.etree.ElementTree as ET
+        records = [{"category": "cpu"}, {"category": "disk"}, {"category": None}]
+        ET.fromstring(category_svg(records))  # must not raise
+        ET.fromstring(category_svg([]))  # empty-state variant too
+
+    def test_category_panel_present_in_rendered_html(self):
+        out = render_html([{"category": "cpu", "severity": "P2", "timestamp": "t1",
+                             "root_cause": "x", "report_file": "r.md", "auto_remediated": False}])
+        assert "Incidents by Category" in out

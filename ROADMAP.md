@@ -15,13 +15,20 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
   SSH instead of one process per host. Needs careful thought before it
   touches `SAFETY.md`'s threat model - remote command execution changes the
   risk profile even if remediation stays allow-listed.
-- **Suggest a threshold, don't just flag flapping** - `monitor/flapping.py`
-  (2.3.0) flags repeated incidents but doesn't act on it. Once it's flagged
-  something a few times, the watchdog could suggest a concrete
-  `--adaptive-thresholds`/config change instead of just repeating the warning.
 - **Slash-command / webhook query into `incident_db.py`** - let a Slack or
   Discord bot answer "have we seen X before?" by querying the SQLite index
-  directly, instead of requiring shell access to the host.
+  directly, instead of requiring shell access to the host. Needs Slack/Discord
+  signature verification designed carefully before it's exposed to the network.
+- **CSV/JSON export for `incident_db.py --stats`** - `--stats` currently
+  supports `text`/`json`; a `--format csv` for the by-severity/by-category
+  breakdown would make it easy to chart in a spreadsheet.
+- **Category chart drill-down in the dashboard** - clicking a bar in
+  "Incidents by Category" could filter the recent-incidents table to that
+  category, reusing the existing client-side search box's filtering logic.
+- **Maintenance windows / quiet hours** - let a config mark a time range
+  (e.g. a known nightly batch job) where breaches still get logged and
+  indexed, but don't send a notification - broader than flapping throttling,
+  which only kicks in after a category has already started repeating.
 
 ## Explicitly out of scope (for now)
 

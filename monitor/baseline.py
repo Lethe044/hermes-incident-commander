@@ -35,7 +35,8 @@ BASELINE_FILE = INCIDENT_DIR / "baseline.json"
 MIN_SAMPLES_PER_HOUR = 20
 
 
-def _load(path: Path = BASELINE_FILE) -> dict[str, Any]:
+def _load(path: Path | None = None) -> dict[str, Any]:
+    path = path if path is not None else BASELINE_FILE
     if not path.exists():
         return {}
     try:
@@ -44,18 +45,24 @@ def _load(path: Path = BASELINE_FILE) -> dict[str, Any]:
         return {}
 
 
-def _save(data: dict[str, Any], path: Path = BASELINE_FILE) -> None:
+def _save(data: dict[str, Any], path: Path | None = None) -> None:
+    path = path if path is not None else BASELINE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data))
 
 
 def update_baseline(
-    metric_samples: dict[str, float], hour: int, path: Path = BASELINE_FILE
+    metric_samples: dict[str, float], hour: int, path: Path | None = None
 ) -> None:
     """Updates the running per-hour mean/variance for each metric in
     `metric_samples` (e.g. {"cpu": 23.4, "mem": 51.0, "disk": 46.2}).
     `hour` is 0-23, local time. Safe to call on every poll - this is O(1)
-    per metric and never re-reads raw samples."""
+    per metric and never re-reads raw samples.
+
+    `path` defaults to the *current* value of `BASELINE_FILE` (resolved
+    each call, not bound at import time) so tests can monkeypatch
+    `baseline.BASELINE_FILE` and have it actually take effect."""
+    path = path if path is not None else BASELINE_FILE
     data = _load(path)
     hour_key = str(hour)
     for metric, value in metric_samples.items():
@@ -78,12 +85,13 @@ def get_adaptive_threshold(
     z_threshold: float = 3.0,
     cap_multiplier: float = 1.5,
     min_samples: int = MIN_SAMPLES_PER_HOUR,
-    path: Path = BASELINE_FILE,
+    path: Path | None = None,
 ) -> float:
     """Returns the effective threshold to use for `metric` at `hour`:
     never below `static_threshold`, never above
     `static_threshold * cap_multiplier`, and only raised above
     `static_threshold` once this hour has at least `min_samples` samples."""
+    path = path if path is not None else BASELINE_FILE
     data = _load(path)
     stats = data.get(metric, {}).get(str(hour))
     if not stats or stats.get("n", 0) < min_samples:
@@ -97,10 +105,11 @@ def get_adaptive_threshold(
     return min(max(static_threshold, adaptive), static_threshold * cap_multiplier)
 
 
-def hour_summary(path: Path = BASELINE_FILE) -> dict[str, dict[str, Any]]:
+def hour_summary(path: Path | None = None) -> dict[str, dict[str, Any]]:
     """Returns a small human-readable summary per metric/hour - used by the
     `--show-baseline` CLI flag and handy for debugging. Hours with fewer
     than MIN_SAMPLES_PER_HOUR samples are marked as not-yet-trusted."""
+    path = path if path is not None else BASELINE_FILE
     data = _load(path)
     summary: dict[str, dict[str, Any]] = {}
     for metric, hours in data.items():

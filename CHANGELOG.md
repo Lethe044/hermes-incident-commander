@@ -3,7 +3,57 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.4.0] - Unreleased
+## [2.5.0] - Unreleased
+
+### Added
+- **Threshold suggestion for flapping incidents** - `suggest_threshold()` in
+  `monitor/watchdog.py`: when a cpu/mem/disk category is flapping, the
+  report now proposes a specific new threshold value (preferring a learned
+  `--adaptive-thresholds` baseline for the current hour when trusted data
+  exists, otherwise a conservative +5 bump capped at 98) instead of just
+  repeating the "FLAPPING DETECTED" warning. Non-numeric categories
+  (`service`, `network`, ...) get no suggestion, since there's no single
+  threshold to change.
+- **Notification throttling during an ongoing flap** - once a category has
+  crossed the flapping threshold and been alerted on once, `run_once()` no
+  longer sends a repeat Discord/Slack/PagerDuty notification for every
+  additional occurrence in the same window - only the first crossing
+  notifies. The incident report and `history.jsonl` still record every
+  occurrence; only the outbound page is throttled.
+- **`incident_db.py --stats`** - `compute_stats()`/`format_stats()`: total
+  incidents, breakdown by severity and category, auto-remediation rate,
+  incidents in the last 7/30 days, most recent incident, and the busiest
+  category. Supports `--format json` alongside the default text summary.
+- **Category breakdown chart in the offline dashboard** - `category_svg()`
+  in `monitor/dashboard.py`: a horizontal SVG bar chart of incident counts
+  by category (same hand-rolled-SVG/no-chart.js style as the other charts),
+  in its own panel between "Incidents by Severity" and the trend chart.
+  Caps at 8 categories with a "+N more categories not shown" footer for
+  hosts with a lot of distinct categories.
+
+### Fixed
+- **Real path-isolation bug in `flapping.py`, `baseline.py`, and
+  `incident_db.py`.** Their `path`/`db_path` function parameters defaulted
+  to a module-level constant (e.g. `path: Path = FREQUENCY_FILE`), which
+  Python binds once at import time - so patching `flapping.FREQUENCY_FILE`
+  (or `baseline.BASELINE_FILE`, `incident_db.DB_PATH`) afterward, including
+  from tests via `monkeypatch`, was silently ignored and calls kept using
+  the original path. In practice this meant several existing tests that
+  believed they were writing to an isolated `tmp_path` were actually
+  writing to the real `~/.hermes/incidents/` directory. Changed all of
+  these to `path: Path | None = None` with the module constant resolved
+  fresh inside the function body on every call, and updated the affected
+  tests to patch every module a code path touches (watchdog's
+  `write_incident()`/`run_once()` also reach into `monitor.flapping` and
+  `monitor.incident_db`, not just its own globals).
+- 29 new tests: `TestSuggestThreshold` (6), notification-throttling tests
+  in `TestRunOnceAndPagerDutyResolve` (3), flapping-report-suggestion tests
+  in `TestFlapping` (2), `TestIncidentDBStats` (10),
+  `TestDashboardCategoryChart` (8) - plus path-isolation fixes to 2
+  pre-existing tests that were unknowingly writing to the real
+  `~/.hermes/incidents/`. 159 tests total across the suite.
+
+## [2.4.0] - Released
 
 ### Added
 - **Trend chart in the offline dashboard** - `monitor/dashboard.py` now

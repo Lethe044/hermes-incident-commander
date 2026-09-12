@@ -16,6 +16,25 @@ no Hermes installation required.
 
 ## What's New
 
+- 💡 **Flapping incidents now suggest a concrete threshold fix** - instead
+  of just repeating "this is flapping," the report proposes a specific new
+  `cpu_threshold`/`mem_threshold`/`disk_threshold` value (learned from
+  `--adaptive-thresholds` baseline data when available, otherwise a
+  conservative bump) - and the watchdog throttles repeat notifications for
+  the same ongoing flap so you're not paged over and over for the same
+  known issue.
+- 📊 **`incident_db.py --stats`** - total incidents, breakdown by severity
+  and category, auto-remediation rate, incidents in the last 7/30 days,
+  and the busiest category, as text or `--format json`.
+- 🗂️ **Category breakdown chart in the offline dashboard** - a horizontal
+  bar chart of incident counts by category, next to the severity and trend
+  charts.
+- 🐛 **Fixed a real path-isolation bug** in `flapping.py`, `baseline.py`,
+  and `incident_db.py`: their default file-path arguments were bound at
+  import time, so tests (or any other caller) patching the module-level
+  path constant after import were silently ignored and could write to the
+  real `~/.hermes/incidents/` instead of the intended location. Paths are
+  now resolved fresh on every call.
 - 📈 **Trend chart in the offline dashboard** - a 14-day incidents-per-day
   line chart (still a hand-rolled SVG, no chart.js) sits next to the
   severity breakdown so "is this getting better or worse" is visible at a
@@ -154,6 +173,7 @@ python -m monitor.watchdog --show-baseline
 python -m monitor.incident_db --sync
 python -m monitor.incident_db --search "nginx"
 python -m monitor.incident_db --search "nginx" --format json     # or --format csv
+python -m monitor.incident_db --stats                            # or --stats --format json
 
 # Check a config file for typos/invalid allow-list entries before using it
 python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
@@ -193,15 +213,24 @@ If the same category of incident fires 3+ times within an hour,
 `monitor/flapping.py` flags it - a "⚠️ FLAPPING DETECTED" banner at the top
 of the report, a console warning, and a badge in the dashboard - since
 that's usually either a root cause that isn't actually fixed, or a
-threshold tuned too tight for normal load.
+threshold tuned too tight for normal load. For cpu/mem/disk, the banner
+also proposes a concrete new threshold (`suggest_threshold()` - a learned
+`--adaptive-thresholds` baseline value when trusted data exists, otherwise
+a conservative bump) instead of just repeating the warning forever. Once a
+category has crossed the flapping threshold and been alerted on once, the
+watchdog throttles further Discord/Slack/PagerDuty notifications for that
+same ongoing flap - the report and `history.jsonl` still record every
+occurrence, only the repeat page is suppressed.
 
 Every incident is also indexed by `monitor/incident_db.py` (SQLite, with a
 full-text search index when your Python's SQLite has FTS5 - falling back to
 a plain `LIKE` scan otherwise) so "have we seen this before?" works without
 a full Hermes install. `write_incident()` keeps it in sync automatically;
-`--sync`/`--search` are there for manual use or a cron job, and `--format
+`--sync`/`--search` are there for manual use or a cron job, `--format
 json`/`--format csv` let you pipe a search straight into another tool or a
-weekly incident-review report instead of only reading it on screen.
+weekly incident-review report instead of only reading it on screen, and
+`--stats` prints a quick summary (totals, by severity/category,
+auto-remediation rate, last 7/30 days, busiest category).
 
 Before trusting a new `watchdog_config.yaml`, run `--validate-config`: it
 flags unrecognized keys (a likely typo), thresholds outside 0-100,
@@ -223,14 +252,15 @@ python -m monitor.dashboard --open
 ```
 
 This writes a single, self-contained HTML file (no server, no external
-requests) summarizing incident counts by severity, a 14-day incidents-per-day
-trend, auto-remediation rate, and a searchable recent-incidents table.
+requests) summarizing incident counts by severity and category, a 14-day
+incidents-per-day trend, auto-remediation rate, and a searchable
+recent-incidents table.
 
 <p align="center">
   <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data, including the incidents-per-day trend chart" width="700">
 </p>
 
-<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the 14-day trend chart, search box, and a flapping badge), not a mockup.</sub></p>
+<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the category breakdown, 14-day trend chart, search box, and a flapping badge), not a mockup.</sub></p>
 
 If you already run Prometheus and Grafana, you can scrape the watchdog
 directly instead of (or alongside) the dashboard - `--metrics-port` starts a
@@ -333,7 +363,7 @@ graph LR
 
     SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 130 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 159 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -453,11 +483,12 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (130 tests: scenarios, reward function, skill file,
+# Run full test suite (159 tests: scenarios, reward function, skill file,
 # demo script, notifier incl. PagerDuty + retry/backoff, watchdog
-# dry-run/resolve wiring/--validate-config, Prometheus exporter, incident
-# search (SQLite/FTS + CSV/JSON export), adaptive baseline, flapping
-# detection, dashboard incl. search box + trend chart)
+# dry-run/resolve wiring/--validate-config/notification throttling,
+# Prometheus exporter, incident search + stats (SQLite/FTS + CSV/JSON
+# export), adaptive baseline, flapping detection + threshold suggestion,
+# dashboard incl. search box + trend + category charts)
 pytest tests/ -v
 
 # Run specific test classes
@@ -484,7 +515,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 130 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 159 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 

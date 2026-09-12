@@ -25,7 +25,8 @@ DEFAULT_WINDOW_MINUTES = 60
 DEFAULT_FLAP_THRESHOLD = 3
 
 
-def _load(path: Path = FREQUENCY_FILE) -> dict[str, list[str]]:
+def _load(path: Path | None = None) -> dict[str, list[str]]:
+    path = path if path is not None else FREQUENCY_FILE
     if not path.exists():
         return {}
     try:
@@ -34,7 +35,8 @@ def _load(path: Path = FREQUENCY_FILE) -> dict[str, list[str]]:
         return {}
 
 
-def _save(data: dict[str, list[str]], path: Path = FREQUENCY_FILE) -> None:
+def _save(data: dict[str, list[str]], path: Path | None = None) -> None:
+    path = path if path is not None else FREQUENCY_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data))
 
@@ -48,13 +50,20 @@ def record_and_check(
     timestamp: str,
     window_minutes: int = DEFAULT_WINDOW_MINUTES,
     flap_threshold: int = DEFAULT_FLAP_THRESHOLD,
-    path: Path = FREQUENCY_FILE,
+    path: Path | None = None,
 ) -> dict[str, Any]:
     """Records this incident's timestamp for `category`, prunes timestamps
     older than `window_minutes` so the file never grows unbounded, and
     returns how many incidents of that category have occurred within the
     trailing window (including this one) plus whether that meets
-    `flap_threshold`."""
+    `flap_threshold`.
+
+    `path` defaults to the *current* value of `FREQUENCY_FILE` (resolved
+    each call, not bound at import time) so tests - or anything else - can
+    monkeypatch `flapping.FREQUENCY_FILE` and have it actually take
+    effect; a `Path = FREQUENCY_FILE` default argument would silently
+    ignore that patch and keep writing to the original path."""
+    path = path if path is not None else FREQUENCY_FILE
     data = _load(path)
     timestamps = data.get(category, [])
 
@@ -78,5 +87,6 @@ def record_and_check(
         "category": category,
         "count": count,
         "window_minutes": window_minutes,
+        "flap_threshold": flap_threshold,
         "is_flapping": count >= flap_threshold,
     }

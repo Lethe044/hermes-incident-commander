@@ -191,6 +191,55 @@ def trend_svg(records: list[dict[str, Any]], width: int = 480, height: int = 140
     )
 
 
+def category_svg(records: list[dict[str, Any]], width: int = 480, max_categories: int = 8) -> str:
+    """A small hand-rolled horizontal SVG bar chart of incident counts by
+    category (same no-chart.js/no-CDN style as bar_svg/trend_svg).
+    Horizontal, unlike the fixed four-column severity chart, since
+    categories are open-ended strings ("service", "ecs", "lambda", a
+    user's own label, ...) rather than a fixed small set."""
+    counts = Counter(str(r.get("category") or "unknown") for r in records)
+    if not counts:
+        return (
+            f'<svg viewBox="0 0 {width} 60" width="100%" style="max-width:{width}px">'
+            f'<text x="{width / 2}" y="30" text-anchor="middle" font-size="12" '
+            f'fill="#6b7280">No incidents yet</text></svg>'
+        )
+
+    top = counts.most_common(max_categories)
+    max_count = top[0][1]
+    row_h = 26
+    height = len(top) * row_h + 10
+    label_w = 110
+    bar_area = width - label_w - 40
+
+    rows = []
+    for i, (cat, count) in enumerate(top):
+        y = 10 + i * row_h
+        bar_w = max(round((count / max_count) * bar_area), 3)
+        label = cat if len(cat) <= 14 else cat[:13] + "\u2026"
+        rows.append(
+            f'<text x="{label_w - 8}" y="{y + row_h / 2 + 4}" text-anchor="end" '
+            f'font-size="12" fill="#c9d1d9">{html.escape(label)}</text>'
+            f'<rect x="{label_w}" y="{y + 4}" width="{bar_w}" height="{row_h - 10}" '
+            f'rx="3" fill="#58a6ff"><title>{html.escape(cat)}: {count}</title></rect>'
+            f'<text x="{label_w + bar_w + 6}" y="{y + row_h / 2 + 4}" font-size="12" '
+            f'fill="#8b949e">{count}</text>'
+        )
+    remainder = len(counts) - len(top)
+    footer = (
+        f'<text x="{label_w}" y="{height + 2}" font-size="10" fill="#6b7280">'
+        f'+{remainder} more categor{"y" if remainder == 1 else "ies"} not shown</text>'
+        if remainder > 0 else ""
+    )
+    if remainder > 0:
+        height += 16
+
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="100%" style="max-width:{width}px">'
+        + "".join(rows) + footer + "</svg>"
+    )
+
+
 def render_html(records: list[dict[str, Any]]) -> str:
     counts = Counter(r.get("severity", "unknown").upper() for r in records)
     total = len(records)
@@ -319,6 +368,11 @@ def render_html(records: list[dict[str, Any]]) -> str:
   <div class="panel">
     <h2>Incidents by Severity</h2>
     {bar_svg(counts)}
+  </div>
+
+  <div class="panel">
+    <h2>Incidents by Category</h2>
+    {category_svg(records)}
   </div>
 
   <div class="panel">
