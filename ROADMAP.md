@@ -19,16 +19,20 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
   Discord bot answer "have we seen X before?" by querying the SQLite index
   directly, instead of requiring shell access to the host. Needs Slack/Discord
   signature verification designed carefully before it's exposed to the network.
-- **CSV/JSON export for `incident_db.py --stats`** - `--stats` currently
-  supports `text`/`json`; a `--format csv` for the by-severity/by-category
-  breakdown would make it easy to chart in a spreadsheet.
-- **Category chart drill-down in the dashboard** - clicking a bar in
-  "Incidents by Category" could filter the recent-incidents table to that
-  category, reusing the existing client-side search box's filtering logic.
-- **Maintenance windows / quiet hours** - let a config mark a time range
-  (e.g. a known nightly batch job) where breaches still get logged and
-  indexed, but don't send a notification - broader than flapping throttling,
-  which only kicks in after a category has already started repeating.
+- **Retention / pruning for old incident reports** - `INCIDENT_DIR` grows
+  unbounded today. A `--prune --older-than-days N` (dry-run by default,
+  `--yes` to actually delete/archive) for `incident_db.py` would keep disk
+  usage bounded on long-running installs without touching the safety model
+  (it only ever removes informational markdown reports and old DB/history
+  rows, never live remediation).
+- **Configurable generic-webhook payload template** - the payload shape is
+  fixed today (`source`, `title`, `message`, `severity`); some platforms
+  expect a different shape and would need a small Jinja-style template
+  option instead of code changes per integration.
+- **Delayed "still ongoing" notification after quiet hours end** - if a
+  breach is still active when a quiet-hours window closes, send one
+  notification then instead of staying silent until the next unrelated
+  poll happens to notice.
 
 ## Explicitly out of scope (for now)
 

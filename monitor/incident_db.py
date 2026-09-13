@@ -22,6 +22,7 @@ Usage:
     python -m monitor.incident_db --search "nginx" --format csv > incidents.csv
     python -m monitor.incident_db --stats              # summary: counts, rate, busiest category
     python -m monitor.incident_db --stats --format json
+    python -m monitor.incident_db --stats --format csv > stats.csv
 """
 
 from __future__ import annotations
@@ -347,10 +348,28 @@ _SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 def format_stats(stats: dict[str, Any], fmt: str = "text") -> str:
     """Renders compute_stats() output as `text` (a short human-readable
-    summary) or `json` (the raw dict) - mirrors format_results()'s output
-    contract so --search and --stats behave consistently."""
+    summary), `json` (the raw dict), or `csv` (a flat dimension/key/value
+    table - easy to chart in a spreadsheet) - mirrors format_results()'s
+    output contract so --search and --stats behave consistently."""
     if fmt == "json":
         return json.dumps(stats, indent=2)
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["dimension", "key", "value"])
+        writer.writerow(["summary", "total", stats["total"]])
+        writer.writerow(["summary", "auto_remediated", stats["auto_remediated"]])
+        writer.writerow(["summary", "auto_remediated_rate", stats["auto_remediated_rate"]])
+        writer.writerow(["summary", "last_7_days", stats["last_7_days"]])
+        writer.writerow(["summary", "last_30_days", stats["last_30_days"]])
+        writer.writerow(["summary", "most_recent_timestamp", stats["most_recent_timestamp"] or ""])
+        writer.writerow(["summary", "top_category", stats["top_category"] or ""])
+        for sev, n in stats["by_severity"].items():
+            writer.writerow(["severity", sev, n])
+        for cat, n in stats["by_category"].items():
+            writer.writerow(["category", cat, n])
+        return buf.getvalue().rstrip("\n")
 
     if stats["total"] == 0:
         return "No incidents recorded yet. Run --sync after the watchdog has written some history."
@@ -395,8 +414,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--format", choices=["text", "json", "csv"], default="text",
-        help="Output format for --search/--stats results (default: text; csv only applies "
-             "to --search). json/csv are meant to be piped into a report or another tool.",
+        help="Output format for --search/--stats results (default: text). "
+             "json/csv are meant to be piped into a report or another tool.",
     )
     args = parser.parse_args()
 
@@ -417,8 +436,7 @@ def main() -> None:
                 print(output)
 
         if args.stats:
-            fmt = "json" if args.format == "json" else "text"
-            print(format_stats(compute_stats(conn), fmt=fmt))
+            print(format_stats(compute_stats(conn), fmt=args.format))
     finally:
         conn.close()
 

@@ -10,6 +10,13 @@ URLs or routing keys to source control):
     export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
     export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
     export PAGERDUTY_ROUTING_KEY="..."   # PagerDuty Events API v2 integration key
+    export GENERIC_WEBHOOK_URL="..."     # any endpoint that accepts a JSON POST
+
+The generic webhook is for anything without first-class support here
+(Opsgenie, a custom internal tool, Microsoft Teams via a relay, etc.) -
+it POSTs a small, stable JSON body ({"source", "title", "message",
+"severity"} - "severity" omitted when not applicable) rather than trying
+to match any one platform's expected schema.
 
 Usage:
     from monitor.notifier import Notifier
@@ -27,6 +34,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Any
 
 PAGERDUTY_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue"
 
@@ -57,6 +65,7 @@ class Notifier:
         discord_webhook_url: str | None = None,
         slack_webhook_url: str | None = None,
         pagerduty_routing_key: str | None = None,
+        generic_webhook_url: str | None = None,
         timeout: int = 10,
         max_retries: int = 2,
         backoff_seconds: float = 0.5,
@@ -64,6 +73,7 @@ class Notifier:
         self.discord_webhook_url = discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
         self.slack_webhook_url = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
         self.pagerduty_routing_key = pagerduty_routing_key or os.environ.get("PAGERDUTY_ROUTING_KEY")
+        self.generic_webhook_url = generic_webhook_url or os.environ.get("GENERIC_WEBHOOK_URL")
         self.timeout = timeout
         # A transient blip (DNS hiccup, 502 from Discord, a dropped
         # connection) shouldn't mean a real P0 page never goes out. Retries
@@ -74,7 +84,8 @@ class Notifier:
     @property
     def configured(self) -> bool:
         return bool(
-            self.discord_webhook_url or self.slack_webhook_url or self.pagerduty_routing_key
+            self.discord_webhook_url or self.slack_webhook_url
+            or self.pagerduty_routing_key or self.generic_webhook_url
         )
 
     # -- low level -----------------------------------------------------
@@ -118,8 +129,10 @@ class Notifier:
             detail=f"{last_detail} (gave up after {attempts} attempt{'s' if attempts != 1 else ''})",
         )
 
-    def send(self, message: str, title: str | None = None) -> list[NotifyResult]:
-        """Send a plain-text style message to every configured channel."""
+    def send(self, message: str, title: str | None = None, severity: str | None = None) -> list[NotifyResult]:
+        """Send a plain-text style message to every configured channel.
+        `severity` is optional and only included in the generic webhook
+        payload (Discord/Slack render it via `title` instead)."""
         results: list[NotifyResult] = []
 
         if self.discord_webhook_url:
@@ -129,6 +142,16 @@ class Notifier:
         if self.slack_webhook_url:
             text = f"*{title}*\n{message}" if title else message
             results.append(self._post_json(self.slack_webhook_url, {"text": text[:3800]}))
+
+        if self.generic_webhook_url:
+            payload: dict[str, Any] = {
+                "source": "hermes-incident-commander",
+                "title": title or "Hermes Incident Commander",
+                "message": message,
+            }
+            if severity:
+                payload["severity"] = severity
+            results.append(self._post_json(self.generic_webhook_url, payload))
 
         return results
 
@@ -198,7 +221,7 @@ class Notifier:
         self, severity: str, title_text: str, detail: str, dedup_key: str | None = None
     ) -> list[NotifyResult]:
         emoji = {"P0": "🚨", "P1": "🔴", "P2": "🟠", "P3": "🟡"}.get(severity, "ℹ️")
-        results = self.send(detail, title=f"{emoji} {severity} - {title_text}")
+        results = self.send(detail, title=f"{emoji} {severity} - {title_text}", severity=severity)
 
         pd_result = self.send_pagerduty_event(
             summary=f"[{severity}] {title_text}: {detail.splitlines()[0]}"[:1024],
@@ -227,7 +250,7 @@ def test_notify() -> None:
     if not notifier.configured:
         print(
             "No channels configured. Set DISCORD_WEBHOOK_URL, SLACK_WEBHOOK_URL, "
-            "and/or PAGERDUTY_ROUTING_KEY."
+            "PAGERDUTY_ROUTING_KEY, and/or GENERIC_WEBHOOK_URL."
         )
         return
     results = notifier.send(

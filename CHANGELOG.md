@@ -3,7 +3,45 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.5.0] - Unreleased
+## [2.6.0] - Unreleased
+
+### Added
+- **Quiet hours / maintenance windows** - a new `quiet_hours` config field:
+  recurring daily UTC windows (each `{"start": "HH:MM", "end": "HH:MM",
+  "days": [...]}`, "days" optional, windows may wrap midnight) during
+  which breaches are still detected, written to the report, and indexed
+  as normal - only the outbound notification is suppressed. `in_quiet_hours()`
+  in `monitor/watchdog.py`; validated by `--validate-config` (malformed
+  windows, bad HH:MM format, invalid weekday abbreviations are all
+  flagged as errors). The flapping-repeat throttle added in 2.5.0 and
+  quiet hours now share one `suppress_reason` decision in `run_once()`.
+- **Generic webhook notification channel** - `GENERIC_WEBHOOK_URL` (or
+  `Notifier(generic_webhook_url=...)`) posts a small, stable JSON body
+  (`source`, `title`, `message`, `severity` - severity omitted when not
+  applicable) to any endpoint that accepts a JSON POST, for platforms
+  without first-class support (Opsgenie, Microsoft Teams via a relay, an
+  internal tool). Reaches every `send()`-based notification path
+  (`send_alert`, `send_p0_alert`, `send_resolution`, `send_daily_briefing`,
+  the `--test-notify` CLI helper).
+- **Clickable category chart in the offline dashboard** - clicking a bar
+  in "Incidents by Category" (`category_svg()`) now filters the
+  recent-incidents table to that category via a new `window.filterByCategory()`,
+  reusing the existing search box's filter logic rather than a separate
+  implementation. Category names are safely escaped
+  (`html.escape(json.dumps(...))`) before being embedded in the inline
+  `onclick` handler.
+- **`incident_db.py --stats --format csv`** - the severity/category
+  breakdown as a flat `dimension,key,value` CSV, easy to chart in a
+  spreadsheet. `--format` now applies uniformly to both `--search` and
+  `--stats`.
+- 27 new tests: generic-webhook tests in `TestNotifier` (4),
+  `TestQuietHours` (10), `quiet_hours` validation tests in
+  `TestValidateConfig` (6), `--stats --format csv` tests (2), clickable
+  category-chart tests including a Node.js DOM-simulation test for
+  `filterByCategory` (3), and quiet-hours suppression tests in
+  `TestRunOnceAndPagerDutyResolve` (2). 186 tests total across the suite.
+
+## [2.5.0] - Released
 
 ### Added
 - **Threshold suggestion for flapping incidents** - `suggest_threshold()` in

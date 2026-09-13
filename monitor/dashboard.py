@@ -217,11 +217,13 @@ def category_svg(records: list[dict[str, Any]], width: int = 480, max_categories
         y = 10 + i * row_h
         bar_w = max(round((count / max_count) * bar_area), 3)
         label = cat if len(cat) <= 14 else cat[:13] + "\u2026"
+        onclick = html.escape(f"filterByCategory({json.dumps(cat)})")
         rows.append(
             f'<text x="{label_w - 8}" y="{y + row_h / 2 + 4}" text-anchor="end" '
             f'font-size="12" fill="#c9d1d9">{html.escape(label)}</text>'
             f'<rect x="{label_w}" y="{y + 4}" width="{bar_w}" height="{row_h - 10}" '
-            f'rx="3" fill="#58a6ff"><title>{html.escape(cat)}: {count}</title></rect>'
+            f'rx="3" fill="#58a6ff" style="cursor:pointer" onclick="{onclick}">'
+            f'<title>{html.escape(cat)}: {count} (click to filter the table below)</title></rect>'
             f'<text x="{label_w + bar_w + 6}" y="{y + row_h / 2 + 4}" font-size="12" '
             f'fill="#8b949e">{count}</text>'
         )
@@ -295,7 +297,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
       var noResults = document.getElementById('no-results');
       var searchCount = document.getElementById('search-count');
 
-      input.addEventListener('input', function () {
+      function applyFilter() {
         var query = input.value;
         var visible = 0;
         rows.forEach(function (row) {
@@ -309,7 +311,19 @@ def render_html(records: list[dict[str, Any]]) -> str:
             ? visible + ' / ' + rows.length + ' shown'
             : '';
         }
-      });
+      }
+
+      input.addEventListener('input', applyFilter);
+
+      // Wired up to the onclick on each bar in the "Incidents by Category"
+      // chart (see category_svg()) so clicking a bar filters the table
+      // below to that category, reusing this same search/filter logic
+      // rather than a separate filtering implementation.
+      window.filterByCategory = function (category) {
+        input.value = category;
+        applyFilter();
+        input.scrollIntoView({behavior: 'smooth', block: 'center'});
+      };
     })();
   </script>""" if rows else ""
 

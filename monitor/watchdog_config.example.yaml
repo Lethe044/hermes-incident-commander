@@ -32,3 +32,16 @@ remediation_allowlist:
 auto_remediate: false
 
 model: "claude-sonnet-4-20250514"
+
+# Optional: recurring daily UTC windows during which breaches are still
+# detected, reported, and indexed as normal, but the outbound
+# Discord/Slack/PagerDuty/webhook notification is suppressed - e.g. a known
+# nightly batch job that predictably spikes CPU. "days" is optional and
+# defaults to every day; a window may wrap midnight (start > end).
+# Validate with --validate-config before relying on it.
+# quiet_hours:
+#   - start: "02:00"
+#     end: "03:00"
+#   - start: "23:00"
+#     end: "05:00"
+#     days: [sat, sun]

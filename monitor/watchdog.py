@@ -33,6 +33,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -92,6 +93,14 @@ class WatchdogConfig:
     auto_remediate: bool = False
     adaptive_thresholds: bool = False
     model: str = DEFAULT_MODEL
+    # Recurring daily windows (UTC, matching metrics.timestamp) during which
+    # breaches are still detected, written to the report, and indexed as
+    # normal - only the outbound Discord/Slack/PagerDuty/webhook
+    # notification is suppressed. Each entry:
+    # {"start": "HH:MM", "end": "HH:MM", "days": ["mon", ...]} - "days" is
+    # optional and defaults to every day. A window may wrap midnight
+    # (start > end). See in_quiet_hours().
+    quiet_hours: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_file(cls, path: str) -> WatchdogConfig:
@@ -213,6 +222,25 @@ def validate_config(path: str) -> tuple[list[str], list[str]]:
             "'clean_log_dirs' entries - auto-remediation will never do anything"
         )
 
+    if not isinstance(cfg.quiet_hours, list):
+        errors.append("'quiet_hours' must be a list of {start, end, days?} windows")
+    else:
+        for i, window in enumerate(cfg.quiet_hours):
+            label = f"quiet_hours[{i}]"
+            if not isinstance(window, dict):
+                errors.append(f"'{label}' must be a mapping with 'start' and 'end' keys")
+                continue
+            for key in ("start", "end"):
+                value = window.get(key)
+                if not isinstance(value, str) or not _HHMM_RE.match(value):
+                    errors.append(f"'{label}.{key}' must be a 24-hour \"HH:MM\" string, got {value!r}")
+            days = window.get("days")
+            if days is not None:
+                if not isinstance(days, list) or not all(d in _WEEKDAY_ABBREVS for d in days):
+                    errors.append(
+                        f"'{label}.days' must be a list drawn from {_WEEKDAY_ABBREVS}, got {days!r}"
+                    )
+
     return errors, warnings
 
 
@@ -262,6 +290,55 @@ def suggest_threshold(category: str, cfg: WatchdogConfig) -> dict[str, Any] | No
         "suggested_threshold": bumped,
         "source": "static-bump",
     }
+
+
+_WEEKDAY_ABBREVS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def in_quiet_hours(timestamp: str, quiet_hours: list[dict[str, Any]]) -> bool:
+    """Returns True if `timestamp` (ISO-8601) falls within any configured
+    quiet-hours window - a recurring daily UTC time range (e.g. a known
+    nightly batch job) during which breaches are still detected, reported,
+    and indexed as normal, but the outbound notification is suppressed.
+    Each window is {"start": "HH:MM", "end": "HH:MM", "days": [...]} -
+    "days" is optional (defaults to every day; values are lowercase
+    3-letter weekday abbreviations "mon".."sun"). A window that wraps
+    midnight (start > end, e.g. 23:00-02:00) is handled correctly.
+    Malformed windows are skipped rather than raising, so a typo in one
+    entry can't take down the watchdog."""
+    if not quiet_hours:
+        return False
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+    weekday = _WEEKDAY_ABBREVS[dt.weekday()]
+    minutes_now = dt.hour * 60 + dt.minute
+
+    for window in quiet_hours:
+        if not isinstance(window, dict):
+            continue
+        try:
+            start_h, start_m = (int(x) for x in str(window["start"]).split(":"))
+            end_h, end_m = (int(x) for x in str(window["end"]).split(":"))
+        except (KeyError, ValueError):
+            continue
+
+        days = window.get("days")
+        if days and weekday not in days:
+            continue
+
+        start_min, end_min = start_h * 60 + start_m, end_h * 60 + end_m
+        if start_min <= end_min:
+            if start_min <= minutes_now < end_min:
+                return True
+        else:  # wraps midnight, e.g. 23:00 -> 02:00
+            if minutes_now >= start_min or minutes_now < end_min:
+                return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -687,15 +764,23 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     breached_keys = sorted(k for k, v in breaches.items() if v)
     dedup_key = _record_open_incident(breached_keys, open_incidents)
 
-    # Once a category has already crossed the flapping threshold and been
-    # alerted on once, don't re-page for every additional repeat within the
-    # same window - the report and history.jsonl still record every
-    # occurrence, only the outbound notification is throttled.
-    already_alerted_for_this_flap = (
-        flap_info["is_flapping"] and flap_info["count"] > flap_info["flap_threshold"]
-    )
+    # Two independent reasons to still write the report and index the
+    # incident, but not send an outbound notification: (1) a category that
+    # already crossed the flapping threshold and was alerted on once - no
+    # need to re-page for every additional repeat in the same window - and
+    # (2) a configured quiet-hours window (e.g. a known nightly batch job).
+    # Either one suppresses the page; the report and history.jsonl always
+    # record every occurrence regardless.
+    suppress_reason: str | None = None
+    if flap_info["is_flapping"] and flap_info["count"] > flap_info["flap_threshold"]:
+        suppress_reason = (
+            f"still flapping: {flap_info['count']} '{diagnosis.get('category', 'unknown')}' "
+            f"incidents in the last {flap_info['window_minutes']} min, already alerted once"
+        )
+    elif in_quiet_hours(metrics.timestamp, cfg.quiet_hours):
+        suppress_reason = "inside a configured quiet-hours window"
 
-    if notifier.configured and not already_alerted_for_this_flap:
+    if notifier.configured and suppress_reason is None:
         notifier.send_alert(
             severity=severity,
             title_text=diagnosis.get("category", "incident"),
@@ -707,11 +792,7 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
             dedup_key=dedup_key,
         )
     elif notifier.configured and not quiet:
-        print(
-            f"  -> Notification suppressed (still flapping: {flap_info['count']} "
-            f"'{diagnosis.get('category', 'unknown')}' incidents in the last "
-            f"{flap_info['window_minutes']} min, already alerted once - see report)"
-        )
+        print(f"  -> Notification suppressed ({suppress_reason} - see report)")
 
     return report_path
 

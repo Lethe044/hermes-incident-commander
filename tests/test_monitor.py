@@ -26,6 +26,7 @@ from monitor.watchdog import (
     Metrics,
     WatchdogConfig,
     _clean_old_files,
+    in_quiet_hours,
     run_once,
     safe_remediate,
     suggest_threshold,
@@ -88,6 +89,59 @@ class TestNotifier:
             results = notifier.send("hi")
             assert len(results) == 1
             assert results[0].ok is False
+
+    def test_generic_webhook_configured_via_env(self, monkeypatch):
+        monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+        monkeypatch.setenv("GENERIC_WEBHOOK_URL", "https://example.com/hook")
+        notifier = Notifier()
+        assert notifier.configured is True
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_generic_webhook_posts_json_payload(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(generic_webhook_url="https://example.com/hook")
+        results = notifier.send("something happened", title="Test Title", severity="P1")
+
+        assert len(results) == 1
+        assert results[0].ok is True
+        sent_request = mock_urlopen.call_args[0][0]
+        payload = json.loads(sent_request.data.decode("utf-8"))
+        assert payload["title"] == "Test Title"
+        assert payload["message"] == "something happened"
+        assert payload["severity"] == "P1"
+        assert payload["source"] == "hermes-incident-commander"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_generic_webhook_omits_severity_when_not_given(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(generic_webhook_url="https://example.com/hook")
+        notifier.send("plain message")
+        sent_request = mock_urlopen.call_args[0][0]
+        payload = json.loads(sent_request.data.decode("utf-8"))
+        assert "severity" not in payload
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_alert_reaches_all_configured_channels_including_generic(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(
+            discord_webhook_url="https://discord.com/api/webhooks/1/2",
+            generic_webhook_url="https://example.com/hook",
+        )
+        results = notifier.send_alert(severity="P1", title_text="disk", detail="disk full")
+        # discord + generic webhook (no PagerDuty key configured)
+        assert len(results) == 2
+        assert all(r.ok for r in results)
 
 
 # ---------------------------------------------------------------------------
@@ -414,6 +468,41 @@ class TestValidateConfig:
         errors, warnings = validate_config(path)
         assert any("watched_services" in e for e in errors)
 
+    def test_valid_quiet_hours_has_no_errors(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "quiet_hours:\n  - start: \"02:00\"\n    end: \"04:00\"\n    days: [mon, tue]\n"
+        )
+        errors, warnings = validate_config(path)
+        assert errors == []
+
+    def test_quiet_hours_wrong_type_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, 'quiet_hours: "not a list"\n')
+        errors, warnings = validate_config(path)
+        assert any("quiet_hours" in e for e in errors)
+
+    def test_quiet_hours_window_not_a_mapping_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, "quiet_hours:\n  - \"not a mapping\"\n")
+        errors, warnings = validate_config(path)
+        assert any("quiet_hours[0]" in e for e in errors)
+
+    def test_quiet_hours_bad_time_format_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, 'quiet_hours:\n  - start: "25:99"\n    end: "04:00"\n')
+        errors, warnings = validate_config(path)
+        assert any("quiet_hours[0].start" in e for e in errors)
+
+    def test_quiet_hours_missing_end_is_an_error(self, tmp_path):
+        path = self._write(tmp_path, 'quiet_hours:\n  - start: "02:00"\n')
+        errors, warnings = validate_config(path)
+        assert any("quiet_hours[0].end" in e for e in errors)
+
+    def test_quiet_hours_bad_days_is_an_error(self, tmp_path):
+        path = self._write(
+            tmp_path, 'quiet_hours:\n  - start: "02:00"\n    end: "04:00"\n    days: [funday]\n'
+        )
+        errors, warnings = validate_config(path)
+        assert any("quiet_hours[0].days" in e for e in errors)
+
     def test_cli_validate_config_exit_code_and_output(self, tmp_path, monkeypatch, capsys):
         import monitor.watchdog as wd
         path = self._write(tmp_path, "cpu_threshold: 150\nunexpected_key: 1\n")
@@ -515,6 +604,57 @@ class TestSuggestThreshold:
         class FakeCfg:
             pass
         assert suggest_threshold("cpu", FakeCfg()) is None
+
+
+class TestQuietHours:
+
+    def test_no_windows_never_quiet(self):
+        assert in_quiet_hours("2026-01-01T10:00:00Z", []) is False
+
+    def test_inside_a_simple_window(self):
+        windows = [{"start": "02:00", "end": "04:00"}]
+        assert in_quiet_hours("2026-01-01T03:00:00Z", windows) is True
+
+    def test_outside_a_simple_window(self):
+        windows = [{"start": "02:00", "end": "04:00"}]
+        assert in_quiet_hours("2026-01-01T10:00:00Z", windows) is False
+
+    def test_window_boundaries_are_start_inclusive_end_exclusive(self):
+        windows = [{"start": "02:00", "end": "04:00"}]
+        assert in_quiet_hours("2026-01-01T02:00:00Z", windows) is True
+        assert in_quiet_hours("2026-01-01T04:00:00Z", windows) is False
+
+    def test_window_wrapping_midnight(self):
+        windows = [{"start": "23:00", "end": "02:00"}]
+        assert in_quiet_hours("2026-01-01T23:30:00Z", windows) is True
+        assert in_quiet_hours("2026-01-02T01:00:00Z", windows) is True
+        assert in_quiet_hours("2026-01-01T12:00:00Z", windows) is False
+
+    def test_days_restriction_is_respected(self):
+        # 2026-01-01 is a Thursday.
+        windows = [{"start": "00:00", "end": "23:59", "days": ["mon", "tue"]}]
+        assert in_quiet_hours("2026-01-01T10:00:00Z", windows) is False
+
+        windows_matching_day = [{"start": "00:00", "end": "23:59", "days": ["thu"]}]
+        assert in_quiet_hours("2026-01-01T10:00:00Z", windows_matching_day) is True
+
+    def test_multiple_windows_any_match_suffices(self):
+        windows = [
+            {"start": "02:00", "end": "04:00"},
+            {"start": "20:00", "end": "22:00"},
+        ]
+        assert in_quiet_hours("2026-01-01T21:00:00Z", windows) is True
+
+    def test_malformed_window_is_skipped_not_raised(self):
+        windows = [{"start": "not-a-time", "end": "04:00"}, {"start": "20:00", "end": "22:00"}]
+        assert in_quiet_hours("2026-01-01T21:00:00Z", windows) is True  # 2nd window still applies
+
+    def test_missing_keys_skipped(self):
+        windows = [{"start": "02:00"}]  # no "end"
+        assert in_quiet_hours("2026-01-01T03:00:00Z", windows) is False
+
+    def test_unparseable_timestamp_returns_false(self):
+        assert in_quiet_hours("garbage", [{"start": "00:00", "end": "23:59"}]) is False
 
 
 class TestMetricsBreaches:
@@ -799,6 +939,49 @@ class TestRunOnceAndPagerDutyResolve:
                 "flap_threshold": 3, "is_flapping": False,
             }
             wd.run_once(WatchdogConfig(), notifier, quiet=True)
+
+        mock_send_alert.assert_called_once()
+
+    def test_quiet_hours_suppress_notification(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(
+            timestamp="2026-01-01T03:00:00+00:00",  # inside the quiet window below
+            cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        cfg = WatchdogConfig(quiet_hours=[{"start": "02:00", "end": "04:00"}])
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check, \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 1, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": False,
+            }
+            report = wd.run_once(cfg, notifier, quiet=True)
+
+        mock_send_alert.assert_not_called()
+        assert report is not None and report.exists()
+
+    def test_outside_quiet_hours_still_notifies(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(
+            timestamp="2026-01-01T10:00:00+00:00",  # outside the quiet window below
+            cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        cfg = WatchdogConfig(quiet_hours=[{"start": "02:00", "end": "04:00"}])
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check, \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 1, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": False,
+            }
+            wd.run_once(cfg, notifier, quiet=True)
 
         mock_send_alert.assert_called_once()
 
@@ -1163,6 +1346,27 @@ class TestIncidentDBStats:
         out = capsys.readouterr().out
         parsed = json.loads(out)
         assert parsed["total"] == 4
+
+    def test_format_stats_csv_has_summary_severity_and_category_rows(self, tmp_path, monkeypatch):
+        import csv as csv_mod
+        import io as io_mod
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        out = idb.format_stats(idb.compute_stats(conn), fmt="csv")
+        rows = list(csv_mod.reader(io_mod.StringIO(out)))
+        assert rows[0] == ["dimension", "key", "value"]
+        dims = {r[0] for r in rows[1:]}
+        assert dims == {"summary", "severity", "category"}
+        summary_rows = {r[1]: r[2] for r in rows[1:] if r[0] == "summary"}
+        assert summary_rows["total"] == "4"
+        assert summary_rows["top_category"] == "disk"
+
+    def test_cli_stats_csv(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db(tmp_path, monkeypatch)
+        conn.close()
+        monkeypatch.setattr(sys, "argv", ["incident_db.py", "--stats", "--format", "csv"])
+        idb.main()
+        out = capsys.readouterr().out
+        assert out.startswith("dimension,key,value")
 
     def test_no_args_prints_help_and_does_not_crash(self, tmp_path, monkeypatch, capsys):
         import monitor.incident_db as idb
@@ -1576,3 +1780,75 @@ class TestDashboardCategoryChart:
         out = render_html([{"category": "cpu", "severity": "P2", "timestamp": "t1",
                              "root_cause": "x", "report_file": "r.md", "auto_remediated": False}])
         assert "Incidents by Category" in out
+
+    def test_category_bars_have_clickable_onclick_handler(self):
+        records = [{"category": "cpu"}, {"category": "disk"}]
+        out = render_html(records)
+        assert "onclick=" in out
+        assert "filterByCategory" in out
+
+    def test_category_name_with_quotes_is_safely_escaped(self):
+        # A category containing a double quote must not be able to break out
+        # of the onclick="..." attribute - html.escape() should turn every
+        # literal '"' into '&quot;' before it reaches the attribute.
+        records = [{"category": 'weird"category'}]
+        out = category_svg(records)
+        onclick_value = out.split('onclick="')[1].split('">')[0]
+        assert '"' not in onclick_value
+        assert "&quot;" in onclick_value
+
+    def test_filter_by_category_js_behaves_correctly_under_node(self):
+        import re
+        import shutil
+        import subprocess
+
+        if shutil.which("node") is None:
+            import pytest
+            pytest.skip("node not available in this environment")
+
+        records = [
+            {"timestamp": "t1", "severity": "P0", "category": "service",
+             "root_cause": "nginx crashed", "auto_remediated": True, "report_file": "r1.md"},
+            {"timestamp": "t2", "severity": "P2", "category": "disk",
+             "root_cause": "disk full", "auto_remediated": False, "report_file": "r2.md"},
+        ]
+        out = render_html(records)
+        match = re.search(r"<script>(.*?)</script>", out, re.S)
+        assert match, "search script not found in rendered HTML"
+        dashboard_script = match.group(1)
+
+        harness = """
+        global.window = global;
+        function FakeElement(text) { this.textContent = text; this.style = {}; }
+        var rowEls = [
+          new FakeElement('P0 service nginx crashed'),
+          new FakeElement('P2 disk disk full'),
+        ];
+        var inputEl = {
+          value: '',
+          _listeners: {},
+          addEventListener: function (ev, fn) { this._listeners[ev] = fn; },
+          scrollIntoView: function () {},
+        };
+        var noResultsEl = { style: {} };
+        var searchCountEl = { textContent: '' };
+        global.document = {
+          getElementById: function (id) {
+            if (id === 'incident-search') return inputEl;
+            if (id === 'no-results') return noResultsEl;
+            if (id === 'search-count') return searchCountEl;
+            return null;
+          },
+          querySelectorAll: function () { return rowEls; },
+        };
+        """ + dashboard_script + """
+        filterByCategory('disk');
+        if (inputEl.value !== 'disk') throw new Error('input value not set to clicked category');
+        if (rowEls[0].style.display !== 'none') throw new Error('non-matching row should be hidden');
+        if (rowEls[1].style.display !== '') throw new Error('matching row should stay visible');
+        if (searchCountEl.textContent !== '1 / 2 shown') throw new Error('search count not updated: ' + searchCountEl.textContent);
+        console.log('ok');
+        """
+        result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout

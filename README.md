@@ -16,6 +16,19 @@ no Hermes installation required.
 
 ## What's New
 
+- 🔕 **Quiet hours / maintenance windows** - configure recurring daily UTC
+  windows (e.g. a known nightly batch job) during which breaches are still
+  detected, reported, and indexed as normal, but the outbound notification
+  is suppressed. Validated by `--validate-config` too.
+- 🌐 **Generic webhook notification channel** - `GENERIC_WEBHOOK_URL` posts
+  a small, stable JSON body (`source`, `title`, `message`, `severity`) to
+  any endpoint, for platforms without first-class support here (Opsgenie,
+  Microsoft Teams via a relay, an internal tool).
+- 🖱️ **Clickable category chart in the offline dashboard** - click a bar in
+  "Incidents by Category" to filter the recent-incidents table to that
+  category, reusing the existing search box's filtering logic.
+- 📤 **`incident_db.py --stats --format csv`** - the severity/category
+  breakdown as a flat CSV, easy to chart in a spreadsheet.
 - 💡 **Flapping incidents now suggest a concrete threshold fix** - instead
   of just repeating "this is flapping," the report proposes a specific new
   `cpu_threshold`/`mem_threshold`/`disk_threshold` value (learned from
@@ -145,10 +158,11 @@ and needs nothing but `ANTHROPIC_API_KEY`:
 pip install -e .              # or: pip install -r requirements.txt psutil
 
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional, for real-time alerts (any subset - all three can be set at once):
+# optional, for real-time alerts (any subset - all four can be set at once):
 export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 export PAGERDUTY_ROUTING_KEY=...
+export GENERIC_WEBHOOK_URL=...        # any endpoint that accepts a JSON POST
 
 # Single check - good for testing or a cron job
 python -m monitor.watchdog --once
@@ -173,7 +187,7 @@ python -m monitor.watchdog --show-baseline
 python -m monitor.incident_db --sync
 python -m monitor.incident_db --search "nginx"
 python -m monitor.incident_db --search "nginx" --format json     # or --format csv
-python -m monitor.incident_db --stats                            # or --stats --format json
+python -m monitor.incident_db --stats                            # or --format json/csv
 
 # Check a config file for typos/invalid allow-list entries before using it
 python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
@@ -218,9 +232,27 @@ also proposes a concrete new threshold (`suggest_threshold()` - a learned
 `--adaptive-thresholds` baseline value when trusted data exists, otherwise
 a conservative bump) instead of just repeating the warning forever. Once a
 category has crossed the flapping threshold and been alerted on once, the
-watchdog throttles further Discord/Slack/PagerDuty notifications for that
-same ongoing flap - the report and `history.jsonl` still record every
-occurrence, only the repeat page is suppressed.
+watchdog throttles further Discord/Slack/PagerDuty/webhook notifications
+for that same ongoing flap - the report and `history.jsonl` still record
+every occurrence, only the repeat page is suppressed.
+
+The same suppression applies during a configured **quiet hours** window -
+a recurring daily UTC time range (e.g. a known nightly batch job) set via
+`quiet_hours` in the config:
+
+```yaml
+quiet_hours:
+  - start: "02:00"
+    end: "03:00"          # daily, every day
+  - start: "23:00"
+    end: "05:00"
+    days: [sat, sun]       # only Saturday and Sunday nights
+```
+
+Breaches inside a quiet-hours window are still detected, written to the
+report, and indexed as normal - only the outbound notification is
+suppressed, which is different from `--dry-run` (which also skips
+auto-remediation and PagerDuty bookkeeping entirely).
 
 Every incident is also indexed by `monitor/incident_db.py` (SQLite, with a
 full-text search index when your Python's SQLite has FTS5 - falling back to
@@ -229,15 +261,16 @@ a full Hermes install. `write_incident()` keeps it in sync automatically;
 `--sync`/`--search` are there for manual use or a cron job, `--format
 json`/`--format csv` let you pipe a search straight into another tool or a
 weekly incident-review report instead of only reading it on screen, and
-`--stats` prints a quick summary (totals, by severity/category,
-auto-remediation rate, last 7/30 days, busiest category).
+`--stats` (also `--format json`/`--format csv`) prints a quick summary
+(totals, by severity/category, auto-remediation rate, last 7/30 days,
+busiest category).
 
 Before trusting a new `watchdog_config.yaml`, run `--validate-config`: it
 flags unrecognized keys (a likely typo), thresholds outside 0-100,
-negative intervals, and allow-list entries that don't actually match
-anything (like a `restart_services` entry for a service that isn't in
-`watched_services`) - then prints the fully resolved config and exits,
-without starting the watchdog.
+negative intervals, malformed `quiet_hours` windows, and allow-list entries
+that don't actually match anything (like a `restart_services` entry for a
+service that isn't in `watched_services`) - then prints the fully resolved
+config and exits, without starting the watchdog.
 
 Want it running on boot without setting up the systemd unit by hand?
 [`scripts/install-watchdog.sh`](scripts/install-watchdog.sh) does that in
@@ -252,9 +285,9 @@ python -m monitor.dashboard --open
 ```
 
 This writes a single, self-contained HTML file (no server, no external
-requests) summarizing incident counts by severity and category, a 14-day
-incidents-per-day trend, auto-remediation rate, and a searchable
-recent-incidents table.
+requests) summarizing incident counts by severity and category (click a
+category bar to filter the table below to it), a 14-day incidents-per-day
+trend, auto-remediation rate, and a searchable recent-incidents table.
 
 <p align="center">
   <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data, including the incidents-per-day trend chart" width="700">
@@ -363,7 +396,7 @@ graph LR
 
     SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 159 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 186 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -483,12 +516,13 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (159 tests: scenarios, reward function, skill file,
-# demo script, notifier incl. PagerDuty + retry/backoff, watchdog
-# dry-run/resolve wiring/--validate-config/notification throttling,
-# Prometheus exporter, incident search + stats (SQLite/FTS + CSV/JSON
-# export), adaptive baseline, flapping detection + threshold suggestion,
-# dashboard incl. search box + trend + category charts)
+# Run full test suite (186 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. PagerDuty + retry/backoff + generic webhook,
+# watchdog dry-run/resolve wiring/--validate-config/notification
+# throttling/quiet hours, Prometheus exporter, incident search + stats
+# (SQLite/FTS + CSV/JSON export), adaptive baseline, flapping detection +
+# threshold suggestion, dashboard incl. search box + trend + clickable
+# category charts)
 pytest tests/ -v
 
 # Run specific test classes
@@ -515,7 +549,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 159 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 186 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 
