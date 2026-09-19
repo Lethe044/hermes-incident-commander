@@ -269,6 +269,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
     <div class="search-row">
       <input type="text" id="incident-search" placeholder="Search incidents (severity, category, root cause, report file)..." autocomplete="off">
       <span id="search-count" class="search-count"></span>
+      <button type="button" id="download-csv-btn" class="download-btn">⬇ Download CSV</button>
     </div>""" if rows else ""
 
     table_html = (
@@ -288,6 +289,17 @@ def render_html(records: list[dict[str, Any]]) -> str:
       return text.toLowerCase().indexOf(query.toLowerCase()) !== -1;
     }
 
+    // Also pure/unit-testable: one CSV field, quoted only when it needs to
+    // be (contains a comma, quote, or newline), with internal quotes
+    // doubled per RFC 4180.
+    function csvField(value) {
+      var s = String(value == null ? '' : value);
+      if (/[",\\n]/.test(s)) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+
     (function () {
       var input = document.getElementById('incident-search');
       if (!input) return;
@@ -296,6 +308,7 @@ def render_html(records: list[dict[str, Any]]) -> str:
       );
       var noResults = document.getElementById('no-results');
       var searchCount = document.getElementById('search-count');
+      var downloadBtn = document.getElementById('download-csv-btn');
 
       function applyFilter() {
         var query = input.value;
@@ -324,6 +337,33 @@ def render_html(records: list[dict[str, Any]]) -> str:
         applyFilter();
         input.scrollIntoView({behavior: 'smooth', block: 'center'});
       };
+
+      // Exports exactly what's currently visible (i.e. respects any active
+      // search/category filter), not the full unfiltered table - so
+      // "filter to a category, then download" gives just that category.
+      if (downloadBtn) {
+        downloadBtn.addEventListener('click', function () {
+          var header = ['Severity', 'Timestamp', 'Category', 'Root Cause', 'Auto-fixed', 'Report'];
+          var lines = [header.map(csvField).join(',')];
+          rows.forEach(function (row) {
+            if (row.style.display === 'none') return;
+            var cells = Array.prototype.map.call(
+              row.querySelectorAll('td'),
+              function (td) { return td.textContent.trim(); }
+            );
+            lines.push(cells.map(csvField).join(','));
+          });
+          var blob = new Blob([lines.join('\\r\\n')], {type: 'text/csv;charset=utf-8'});
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          a.href = url;
+          a.download = 'hermes-incidents.csv';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+        });
+      }
     })();
   </script>""" if rows else ""
 
@@ -361,6 +401,11 @@ def render_html(records: list[dict[str, Any]]) -> str:
   }}
   .search-row input:focus {{ border-color: #58a6ff; }}
   .search-count {{ color: #8b949e; font-size: 12px; white-space: nowrap; }}
+  .download-btn {{
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+    padding: 9px 14px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }}
+  .download-btn:hover {{ background: #30363d; border-color: #58a6ff; }}
   .flap-badge {{
     display: inline-block; margin-left: 6px; font-size: 11px; color: #f2994a;
     background: rgba(242, 153, 74, 0.12); border: 1px solid rgba(242, 153, 74, 0.4);

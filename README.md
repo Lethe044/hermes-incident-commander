@@ -16,6 +16,22 @@ no Hermes installation required.
 
 ## What's New
 
+- 🧹 **`incident_db.py --prune`** - removes incidents older than
+  `--older-than-days` (report file, SQLite row, and `history.jsonl` line),
+  dry-run by default, `--yes` to actually delete - keeps disk usage bounded
+  on long-running installs.
+- ⏳ **"Still ongoing" notification after quiet hours end** - if a breach
+  starts during a quiet-hours window and is still active once the window
+  closes, the very next poll sends one notification noting how long it's
+  been running, instead of staying silent until an unrelated later poll
+  happens to notice.
+- 🧩 **Configurable generic-webhook payload template** - `GENERIC_WEBHOOK_TEMPLATE`
+  lets the generic webhook match any target JSON shape (Discord embeds, a
+  custom internal schema, ...) via `{source}`/`{title}`/`{message}`/`{severity}`
+  placeholders, with no brace-escaping needed even for deeply nested JSON.
+- ⬇️ **Download CSV button in the offline dashboard** - exports exactly
+  what's currently visible in the incidents table (respects an active
+  search or category-chart filter), client-side, no server.
 - 🔕 **Quiet hours / maintenance windows** - configure recurring daily UTC
   windows (e.g. a known nightly batch job) during which breaches are still
   detected, reported, and indexed as normal, but the outbound notification
@@ -163,6 +179,7 @@ export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 export PAGERDUTY_ROUTING_KEY=...
 export GENERIC_WEBHOOK_URL=...        # any endpoint that accepts a JSON POST
+export GENERIC_WEBHOOK_TEMPLATE='{"text": {message}}'   # optional - match a specific target's schema
 
 # Single check - good for testing or a cron job
 python -m monitor.watchdog --once
@@ -188,6 +205,8 @@ python -m monitor.incident_db --sync
 python -m monitor.incident_db --search "nginx"
 python -m monitor.incident_db --search "nginx" --format json     # or --format csv
 python -m monitor.incident_db --stats                            # or --format json/csv
+python -m monitor.incident_db --prune --older-than-days 90       # dry run
+python -m monitor.incident_db --prune --older-than-days 90 --yes # actually remove
 
 # Check a config file for typos/invalid allow-list entries before using it
 python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
@@ -252,7 +271,10 @@ quiet_hours:
 Breaches inside a quiet-hours window are still detected, written to the
 report, and indexed as normal - only the outbound notification is
 suppressed, which is different from `--dry-run` (which also skips
-auto-remediation and PagerDuty bookkeeping entirely).
+auto-remediation and PagerDuty bookkeeping entirely). If a breach is still
+active once the window closes, the next poll sends one notification
+noting how long it's been running - "silent during quiet hours" doesn't
+mean "silent forever" if the problem outlasts the maintenance window.
 
 Every incident is also indexed by `monitor/incident_db.py` (SQLite, with a
 full-text search index when your Python's SQLite has FTS5 - falling back to
@@ -260,10 +282,13 @@ a plain `LIKE` scan otherwise) so "have we seen this before?" works without
 a full Hermes install. `write_incident()` keeps it in sync automatically;
 `--sync`/`--search` are there for manual use or a cron job, `--format
 json`/`--format csv` let you pipe a search straight into another tool or a
-weekly incident-review report instead of only reading it on screen, and
+weekly incident-review report instead of only reading it on screen,
 `--stats` (also `--format json`/`--format csv`) prints a quick summary
 (totals, by severity/category, auto-remediation rate, last 7/30 days,
-busiest category).
+busiest category), and `--prune --older-than-days N` (dry-run unless
+`--yes`) removes old incidents - their report file, SQLite row, and
+`history.jsonl` line - so a long-running install doesn't grow `INCIDENT_DIR`
+forever.
 
 Before trusting a new `watchdog_config.yaml`, run `--validate-config`: it
 flags unrecognized keys (a likely typo), thresholds outside 0-100,
@@ -287,13 +312,16 @@ python -m monitor.dashboard --open
 This writes a single, self-contained HTML file (no server, no external
 requests) summarizing incident counts by severity and category (click a
 category bar to filter the table below to it), a 14-day incidents-per-day
-trend, auto-remediation rate, and a searchable recent-incidents table.
+trend, auto-remediation rate, and a searchable recent-incidents table with
+a "Download CSV" button that exports exactly what's currently visible
+(respects an active search or category filter), client-side, no server
+round-trip.
 
 <p align="center">
   <img src="docs/assets/dashboard-screenshot.png" alt="Hermes Incident Commander dashboard, rendered from monitor/dashboard.py with sample data, including the incidents-per-day trend chart" width="700">
 </p>
 
-<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the category breakdown, 14-day trend chart, search box, and a flapping badge), not a mockup.</sub></p>
+<p align="center"><sub>Real output of <code>monitor/dashboard.py</code> - rendered from sample incident history (including the category breakdown, 14-day trend chart, search box with CSV export, and a flapping badge), not a mockup.</sub></p>
 
 If you already run Prometheus and Grafana, you can scrape the watchdog
 directly instead of (or alongside) the dashboard - `--metrics-port` starts a
@@ -396,7 +424,7 @@ graph LR
 
     SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 186 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 207 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -516,13 +544,14 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (186 tests: scenarios, reward function, skill file,
-# demo script, notifier incl. PagerDuty + retry/backoff + generic webhook,
-# watchdog dry-run/resolve wiring/--validate-config/notification
-# throttling/quiet hours, Prometheus exporter, incident search + stats
-# (SQLite/FTS + CSV/JSON export), adaptive baseline, flapping detection +
-# threshold suggestion, dashboard incl. search box + trend + clickable
-# category charts)
+# Run full test suite (207 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. PagerDuty + retry/backoff + generic webhook
+# w/ custom templates, watchdog dry-run/resolve wiring/--validate-config/
+# notification throttling/quiet hours + still-ongoing notice, Prometheus
+# exporter, incident search + stats + prune (SQLite/FTS + CSV/JSON
+# export), adaptive baseline, flapping detection + threshold suggestion,
+# dashboard incl. search box + trend + clickable category charts + CSV
+# download)
 pytest tests/ -v
 
 # Run specific test classes
@@ -549,7 +578,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 186 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 207 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 

@@ -14,9 +14,19 @@ URLs or routing keys to source control):
 
 The generic webhook is for anything without first-class support here
 (Opsgenie, a custom internal tool, Microsoft Teams via a relay, etc.) -
-it POSTs a small, stable JSON body ({"source", "title", "message",
-"severity"} - "severity" omitted when not applicable) rather than trying
-to match any one platform's expected schema.
+by default it POSTs a small, stable JSON body ({"source", "title",
+"message", "severity"} - "severity" omitted when not applicable) rather
+than trying to match any one platform's expected schema. If a target
+needs a different shape, set GENERIC_WEBHOOK_TEMPLATE to a JSON string
+using {source}/{title}/{message}/{severity} placeholders - each one
+substitutes a full, already-JSON-escaped string value (via json.dumps),
+so a placeholder must stand alone as a value, not be concatenated inside
+a larger string:
+
+    export GENERIC_WEBHOOK_TEMPLATE='{"text": {message}, "priority": {severity}}'
+
+A malformed template (bad JSON after substitution, an unknown placeholder)
+falls back to the default shape rather than silently dropping the alert.
 
 Usage:
     from monitor.notifier import Notifier
@@ -66,6 +76,7 @@ class Notifier:
         slack_webhook_url: str | None = None,
         pagerduty_routing_key: str | None = None,
         generic_webhook_url: str | None = None,
+        generic_webhook_template: str | None = None,
         timeout: int = 10,
         max_retries: int = 2,
         backoff_seconds: float = 0.5,
@@ -74,6 +85,9 @@ class Notifier:
         self.slack_webhook_url = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
         self.pagerduty_routing_key = pagerduty_routing_key or os.environ.get("PAGERDUTY_ROUTING_KEY")
         self.generic_webhook_url = generic_webhook_url or os.environ.get("GENERIC_WEBHOOK_URL")
+        self.generic_webhook_template = generic_webhook_template or os.environ.get(
+            "GENERIC_WEBHOOK_TEMPLATE"
+        )
         self.timeout = timeout
         # A transient blip (DNS hiccup, 502 from Discord, a dropped
         # connection) shouldn't mean a real P0 page never goes out. Retries
@@ -144,16 +158,54 @@ class Notifier:
             results.append(self._post_json(self.slack_webhook_url, {"text": text[:3800]}))
 
         if self.generic_webhook_url:
-            payload: dict[str, Any] = {
-                "source": "hermes-incident-commander",
-                "title": title or "Hermes Incident Commander",
-                "message": message,
-            }
-            if severity:
-                payload["severity"] = severity
+            payload = self._render_generic_webhook_payload(title, message, severity)
             results.append(self._post_json(self.generic_webhook_url, payload))
 
         return results
+
+    def _render_generic_webhook_payload(
+        self, title: str | None, message: str, severity: str | None
+    ) -> dict[str, Any]:
+        """Builds the generic-webhook JSON body: the default fixed shape,
+        or - if GENERIC_WEBHOOK_TEMPLATE is set - that template with
+        {source}/{title}/{message}/{severity} substituted in. Uses plain
+        string replacement rather than str.format(), specifically so the
+        template's own JSON braces (`{"text": ...}`) don't need escaping -
+        only the four placeholder tokens are ever touched. Each
+        placeholder is substituted as a full JSON-escaped string (via
+        json.dumps), so newlines or quotes inside `message` can't produce
+        invalid JSON - a placeholder must stand alone as a value
+        ('"text": {message}'), not be concatenated inside a larger string
+        ('"text": "prefix {message}"' would not render to valid JSON).
+        Falls back to the default shape (rather than dropping the
+        notification) if the template doesn't render to valid JSON."""
+        default_payload: dict[str, Any] = {
+            "source": "hermes-incident-commander",
+            "title": title or "Hermes Incident Commander",
+            "message": message,
+        }
+        if severity:
+            default_payload["severity"] = severity
+
+        if not self.generic_webhook_template:
+            return default_payload
+
+        rendered = self.generic_webhook_template
+        for placeholder, value in (
+            ("{source}", json.dumps("hermes-incident-commander")),
+            ("{title}", json.dumps(title or "Hermes Incident Commander")),
+            ("{message}", json.dumps(message)),
+            ("{severity}", json.dumps(severity or "")),
+        ):
+            rendered = rendered.replace(placeholder, value)
+
+        try:
+            payload = json.loads(rendered)
+            if not isinstance(payload, dict):
+                return default_payload
+            return payload
+        except ValueError:
+            return default_payload
 
     # -- PagerDuty (Events API v2) --------------------------------------
 

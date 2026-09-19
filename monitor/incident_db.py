@@ -23,6 +23,8 @@ Usage:
     python -m monitor.incident_db --stats              # summary: counts, rate, busiest category
     python -m monitor.incident_db --stats --format json
     python -m monitor.incident_db --stats --format csv > stats.csv
+    python -m monitor.incident_db --prune --older-than-days 90           # dry run
+    python -m monitor.incident_db --prune --older-than-days 90 --yes     # actually remove
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import csv
 import io
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +402,96 @@ def format_stats(stats: dict[str, Any], fmt: str = "text") -> str:
     return "\n".join(lines)
 
 
+def find_prunable(older_than_days: int, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    """Returns the incidents (timestamp + report_file) older than
+    `older_than_days` - what --prune would remove. Read-only; actual
+    deletion happens in prune(). Incidents whose timestamp can't be
+    parsed are never included, so a malformed row is left alone rather
+    than guessed about."""
+    own_conn = conn is None
+    conn = conn or get_connection()
+    conn.row_factory = sqlite3.Row
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+
+    result = []
+    for row in conn.execute("SELECT timestamp, report_file FROM incidents"):
+        dt = _parse_ts(row["timestamp"])
+        if dt is not None and dt < cutoff:
+            result.append({"timestamp": row["timestamp"], "report_file": row["report_file"]})
+
+    if own_conn:
+        conn.close()
+    return sorted(result, key=lambda r: r["timestamp"])
+
+
+def prune(
+    older_than_days: int, yes: bool = False, conn: sqlite3.Connection | None = None
+) -> dict[str, Any]:
+    """Removes incidents older than `older_than_days`: their report .md
+    file under INCIDENT_DIR (if it still exists), their row in the SQLite
+    index, and their line in history.jsonl. Dry-run unless `yes=True` -
+    either way, the returned dict says what would be/was removed, so a
+    dry run can be reviewed before committing to `--yes`.
+
+    Keeps to the same safety standard as everything else here: this only
+    ever deletes informational report files and its own index/history
+    rows - it never touches a watched service or anything on the
+    remediation allow-list."""
+    own_conn = conn is None
+    conn = conn or get_connection()
+    to_remove = find_prunable(older_than_days, conn=conn)
+
+    result: dict[str, Any] = {
+        "older_than_days": older_than_days,
+        "count": len(to_remove),
+        "report_files": [r["report_file"] for r in to_remove if r["report_file"]],
+        "dry_run": not yes,
+    }
+
+    if not yes:
+        if own_conn:
+            conn.close()
+        return result
+
+    removed_files = 0
+    for r in to_remove:
+        if not r["report_file"]:
+            continue
+        try:
+            (INCIDENT_DIR / r["report_file"]).unlink()
+            removed_files += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    result["report_files_removed"] = removed_files
+
+    remove_timestamps = {r["timestamp"] for r in to_remove}
+    if remove_timestamps:
+        conn.executemany(
+            "DELETE FROM incidents WHERE timestamp = ?", [(t,) for t in remove_timestamps]
+        )
+        conn.commit()
+
+    if HISTORY_LOG.exists() and remove_timestamps:
+        kept_lines = []
+        for line in HISTORY_LOG.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                kept_lines.append(line)  # leave malformed lines alone rather than guess
+                continue
+            if rec.get("timestamp") not in remove_timestamps:
+                kept_lines.append(line)
+        HISTORY_LOG.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""))
+
+    if own_conn:
+        conn.close()
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Hermes Incident Commander - local incident search (SQLite, no server)"
@@ -417,9 +509,23 @@ def main() -> None:
         help="Output format for --search/--stats results (default: text). "
              "json/csv are meant to be piped into a report or another tool.",
     )
+    parser.add_argument(
+        "--prune", action="store_true",
+        help="Remove incidents older than --older-than-days: their report file, "
+             "SQLite row, and history.jsonl line. Dry-run unless --yes is also given.",
+    )
+    parser.add_argument(
+        "--older-than-days", type=int, default=90,
+        help="Age threshold in days for --prune (default: 90)",
+    )
+    parser.add_argument(
+        "--yes", action="store_true",
+        help="Actually perform the --prune deletion (otherwise it's a dry run that only prints "
+             "what would be removed)",
+    )
     args = parser.parse_args()
 
-    if not args.sync and not args.search and not args.stats:
+    if not args.sync and not args.search and not args.stats and not args.prune:
         parser.print_help()
         return
 
@@ -437,6 +543,20 @@ def main() -> None:
 
         if args.stats:
             print(format_stats(compute_stats(conn), fmt=args.format))
+
+        if args.prune:
+            result = prune(args.older_than_days, yes=args.yes, conn=conn)
+            if result["dry_run"]:
+                print(
+                    f"[DRY RUN] Would remove {result['count']} incident(s) older than "
+                    f"{args.older_than_days} days ({len(result['report_files'])} report "
+                    f"file(s)). Re-run with --yes to actually remove them."
+                )
+            else:
+                print(
+                    f"Removed {result['count']} incident(s) older than {args.older_than_days} "
+                    f"days ({result['report_files_removed']} report file(s) deleted)."
+                )
     finally:
         conn.close()
 

@@ -3,7 +3,43 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.6.0] - Unreleased
+## [2.7.0] - Unreleased
+
+### Added
+- **`incident_db.py --prune`** - `find_prunable()`/`prune()`: removes
+  incidents older than `--older-than-days` (default 90) - their report
+  `.md` file under `INCIDENT_DIR`, their SQLite row, and their
+  `history.jsonl` line. Dry-run by default (prints what would be removed);
+  `--yes` actually performs the deletion. Only ever touches informational
+  report files and its own index/history rows - never a watched service or
+  anything on the remediation allow-list.
+- **"Still ongoing" notification after quiet hours end** - if a breach
+  starts during a quiet-hours window (suppressed as usual) and is still
+  active on the first poll after the window closes, that poll sends one
+  notification noting how long it's been running, instead of staying
+  silent until some unrelated later poll happens to notice. Tracked via a
+  small `pending_quiet_notifications.json` state file, cleared as soon as
+  the notice goes out.
+- **Configurable generic-webhook payload template** - `GENERIC_WEBHOOK_TEMPLATE`
+  lets the generic webhook match any target's expected JSON shape (Discord
+  embeds, a custom internal schema, ...) via `{source}`/`{title}`/`{message}`/
+  `{severity}` placeholders. Uses plain string substitution rather than
+  `str.format()` specifically so the template's own JSON braces need no
+  escaping, even for deeply nested objects; each placeholder renders as a
+  full JSON-escaped value, so newlines or quotes in `message` can't break
+  the resulting JSON. Falls back to the default fixed shape if the
+  rendered template isn't valid JSON.
+- **Download CSV button in the offline dashboard** - exports exactly
+  what's currently visible in the incidents table (respects an active
+  search or category-chart filter) as an RFC 4180 CSV, entirely
+  client-side (`Blob` + `URL.createObjectURL`), no server round-trip.
+- 21 new tests: `TestIncidentDBPrune` (7), generic-webhook-template tests
+  in `TestNotifier` (8), quiet-hours "still ongoing" tests in
+  `TestRunOnceAndPagerDutyResolve` (2), and `TestDashboardCSVDownload` (4,
+  including a Node.js DOM-simulation test verifying CSV escaping and that
+  export respects the active filter). 207 tests total across the suite.
+
+## [2.6.0] - Released
 
 ### Added
 - **Quiet hours / maintenance windows** - a new `quiet_hours` config field:

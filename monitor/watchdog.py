@@ -67,6 +67,7 @@ from monitor.prometheus_exporter import start_metrics_server, update_latest_metr
 INCIDENT_DIR = Path.home() / ".hermes" / "incidents"
 HISTORY_LOG = INCIDENT_DIR / "history.jsonl"
 OPEN_INCIDENTS_FILE = INCIDENT_DIR / "open_pagerduty_incidents.json"
+PENDING_QUIET_FILE = INCIDENT_DIR / "pending_quiet_notifications.json"
 
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -609,6 +610,28 @@ def _record_open_incident(breached_keys: list[str], open_incidents: dict[str, st
     return dedup_key
 
 
+def _load_pending_quiet_notices(path: Path | None = None) -> dict[str, Any]:
+    """Tracks categories whose notification was suppressed because a
+    breach started inside a quiet-hours window, so a single "still
+    ongoing" notification can be sent on the first poll after the window
+    closes rather than staying silent indefinitely. `path` is resolved
+    fresh on every call (not bound at import time) so it can be
+    monkeypatched in tests."""
+    path = path if path is not None else PENDING_QUIET_FILE
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_pending_quiet_notices(data: dict[str, Any], path: Path | None = None) -> None:
+    path = path if path is not None else PENDING_QUIET_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
+
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -771,24 +794,48 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     # (2) a configured quiet-hours window (e.g. a known nightly batch job).
     # Either one suppresses the page; the report and history.jsonl always
     # record every occurrence regardless.
+    category = diagnosis.get("category", "unknown")
+    is_currently_quiet = in_quiet_hours(metrics.timestamp, cfg.quiet_hours)
+
     suppress_reason: str | None = None
     if flap_info["is_flapping"] and flap_info["count"] > flap_info["flap_threshold"]:
         suppress_reason = (
-            f"still flapping: {flap_info['count']} '{diagnosis.get('category', 'unknown')}' "
+            f"still flapping: {flap_info['count']} '{category}' "
             f"incidents in the last {flap_info['window_minutes']} min, already alerted once"
         )
-    elif in_quiet_hours(metrics.timestamp, cfg.quiet_hours):
+    elif is_currently_quiet:
         suppress_reason = "inside a configured quiet-hours window"
 
+    # If we're still inside quiet hours, remember when this category first
+    # started breaching so a "still ongoing" notification can go out the
+    # moment the window closes, instead of staying silent until some
+    # unrelated later poll happens to notice. If we've just come out of
+    # quiet hours and this category was pending, this is that moment.
+    pending_quiet = _load_pending_quiet_notices()
+    resuming_after_quiet_hours = False
+    if is_currently_quiet:
+        pending_quiet.setdefault(category, {"since": metrics.timestamp})
+        _save_pending_quiet_notices(pending_quiet)
+    elif category in pending_quiet:
+        resuming_after_quiet_hours = True
+        since = pending_quiet.pop(category, {}).get("since", "an earlier quiet-hours window")
+        _save_pending_quiet_notices(pending_quiet)
+
     if notifier.configured and suppress_reason is None:
+        detail = (
+            f"{diagnosis.get('root_cause_hypothesis', 'See report for details.')}\n"
+            f"Report: {report_path}"
+            + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
+        )
+        if resuming_after_quiet_hours:
+            detail = (
+                f"Ongoing since {since} (suppressed during quiet hours - "
+                f"this is the first notification now that the window has closed).\n"
+            ) + detail
         notifier.send_alert(
             severity=severity,
-            title_text=diagnosis.get("category", "incident"),
-            detail=(
-                f"{diagnosis.get('root_cause_hypothesis', 'See report for details.')}\n"
-                f"Report: {report_path}"
-                + (f"\nAuto-remediated: {', '.join(performed)}" if performed else "")
-            ),
+            title_text=category,
+            detail=detail,
             dedup_key=dedup_key,
         )
     elif notifier.configured and not quiet:

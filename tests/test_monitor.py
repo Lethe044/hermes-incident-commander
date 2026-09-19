@@ -143,6 +143,77 @@ class TestNotifier:
         assert len(results) == 2
         assert all(r.ok for r in results)
 
+    def test_generic_webhook_template_configured_via_env(self, monkeypatch):
+        monkeypatch.setenv("GENERIC_WEBHOOK_TEMPLATE", '{"text": {message}}')
+        notifier = Notifier(generic_webhook_url="https://example.com/hook")
+        assert notifier.generic_webhook_template == '{"text": {message}}'
+
+    def test_generic_webhook_template_renders_custom_shape(self):
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template='{"text": {message}, "priority": {severity}}',
+        )
+        payload = notifier._render_generic_webhook_payload("Title", "hello world", "P1")
+        assert payload == {"text": "hello world", "priority": "P1"}
+
+    def test_generic_webhook_template_escapes_special_characters_in_values(self):
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template='{"text": {message}}',
+        )
+        payload = notifier._render_generic_webhook_payload("T", 'line1\nline2 "quoted"', "P2")
+        assert payload == {"text": 'line1\nline2 "quoted"'}
+
+    def test_generic_webhook_template_supports_nested_json_without_escaping_braces(self):
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template='{"nested": {"inner": {message}}}',
+        )
+        payload = notifier._render_generic_webhook_payload("T", "hi", "P2")
+        assert payload == {"nested": {"inner": "hi"}}
+
+    def test_generic_webhook_malformed_template_falls_back_to_default_shape(self):
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template="not valid json {message}",
+        )
+        payload = notifier._render_generic_webhook_payload("Title", "hello", "P1")
+        assert payload["source"] == "hermes-incident-commander"
+        assert payload["title"] == "Title"
+        assert payload["message"] == "hello"
+        assert payload["severity"] == "P1"
+
+    def test_generic_webhook_template_that_renders_to_a_list_falls_back(self):
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template="[{message}]",
+        )
+        payload = notifier._render_generic_webhook_payload("T", "hello", "P1")
+        assert payload["message"] == "hello"  # default shape, not a bare list
+
+    def test_no_template_uses_default_shape(self):
+        notifier = Notifier(generic_webhook_url="https://example.com/hook")
+        payload = notifier._render_generic_webhook_payload("Title", "msg", "P1")
+        assert payload == {
+            "source": "hermes-incident-commander", "title": "Title",
+            "message": "msg", "severity": "P1",
+        }
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_uses_rendered_template_over_the_wire(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(
+            generic_webhook_url="https://example.com/hook",
+            generic_webhook_template='{"text": {message}}',
+        )
+        notifier.send("hello", title="Title")
+        sent_request = mock_urlopen.call_args[0][0]
+        payload = json.loads(sent_request.data.decode("utf-8"))
+        assert payload == {"text": "hello"}
+
 
 # ---------------------------------------------------------------------------
 # Notifier - retry / backoff
@@ -812,6 +883,7 @@ class TestRunOnceAndPagerDutyResolve:
         monkeypatch.setattr(wd, "INCIDENT_DIR", tmp_path)
         monkeypatch.setattr(wd, "HISTORY_LOG", tmp_path / "history.jsonl")
         monkeypatch.setattr(wd, "OPEN_INCIDENTS_FILE", tmp_path / "open_pagerduty_incidents.json")
+        monkeypatch.setattr(wd, "PENDING_QUIET_FILE", tmp_path / "pending_quiet_notifications.json")
         # write_incident() also calls into monitor.flapping (always) and
         # monitor.incident_db (to keep the search index in sync) - these
         # are separate modules with their own home-directory-derived
@@ -984,6 +1056,65 @@ class TestRunOnceAndPagerDutyResolve:
             wd.run_once(cfg, notifier, quiet=True)
 
         mock_send_alert.assert_called_once()
+
+    def test_still_ongoing_notification_sent_once_quiet_hours_end(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        cfg = WatchdogConfig(quiet_hours=[{"start": "02:00", "end": "04:00"}])
+
+        during_quiet = Metrics(
+            timestamp="2026-01-01T03:00:00+00:00", cpu_percent=99.0,
+            mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        after_quiet = Metrics(
+            timestamp="2026-01-01T04:30:00+00:00", cpu_percent=99.0,
+            mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        flap_info = {"category": "cpu", "count": 1, "window_minutes": 60,
+                     "flap_threshold": 3, "is_flapping": False}
+
+        # Poll 1: breach starts during quiet hours - suppressed, remembered.
+        with patch.object(wd, "collect_metrics", return_value=during_quiet), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check", return_value=flap_info), \
+             patch.object(notifier, "send_alert") as mock_send_alert_1:
+            wd.run_once(cfg, notifier, quiet=True)
+        mock_send_alert_1.assert_not_called()
+        assert json.loads(wd.PENDING_QUIET_FILE.read_text())["cpu"]["since"] == during_quiet.timestamp
+
+        # Poll 2: still breaching, now past the window - one enriched alert,
+        # and the pending marker is cleared.
+        with patch.object(wd, "collect_metrics", return_value=after_quiet), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check", return_value=flap_info), \
+             patch.object(notifier, "send_alert") as mock_send_alert_2:
+            wd.run_once(cfg, notifier, quiet=True)
+
+        mock_send_alert_2.assert_called_once()
+        sent_detail = mock_send_alert_2.call_args.kwargs["detail"]
+        assert "quiet hours" in sent_detail.lower()
+        assert during_quiet.timestamp in sent_detail
+        assert json.loads(wd.PENDING_QUIET_FILE.read_text()) == {}
+
+    def test_no_stale_ongoing_note_on_a_fresh_unrelated_breach(self, tmp_path, monkeypatch):
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        cfg = WatchdogConfig(quiet_hours=[{"start": "02:00", "end": "04:00"}])
+        breached = Metrics(
+            timestamp="2026-01-01T10:00:00+00:00", cpu_percent=99.0,
+            mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        flap_info = {"category": "cpu", "count": 1, "window_minutes": 60,
+                     "flap_threshold": 3, "is_flapping": False}
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check", return_value=flap_info), \
+             patch.object(notifier, "send_alert") as mock_send_alert:
+            wd.run_once(cfg, notifier, quiet=True)
+
+        sent_detail = mock_send_alert.call_args.kwargs["detail"]
+        assert "quiet hours" not in sent_detail.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1377,6 +1508,96 @@ class TestIncidentDBStats:
         idb.main()  # must not raise
         out = capsys.readouterr().out
         assert "usage" in out.lower()
+
+
+class TestIncidentDBPrune:
+
+    def _seeded_db_with_real_report_files(self, tmp_path, monkeypatch):
+        import monitor.incident_db as idb
+        history = tmp_path / "history.jsonl"
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(days=1)).isoformat()
+        old = (now - timedelta(days=120)).isoformat()
+        lines = [
+            {"timestamp": recent, "severity": "P0", "category": "service",
+             "root_cause": "nginx down", "auto_remediated": True, "report_file": "recent.md"},
+            {"timestamp": old, "severity": "P2", "category": "disk",
+             "root_cause": "disk crept up", "auto_remediated": False, "report_file": "old.md"},
+        ]
+        history.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        (tmp_path / "recent.md").write_text("# recent incident\n")
+        (tmp_path / "old.md").write_text("# old incident\n")
+        monkeypatch.setattr(idb, "INCIDENT_DIR", tmp_path)
+        monkeypatch.setattr(idb, "HISTORY_LOG", history)
+        monkeypatch.setattr(idb, "DB_PATH", tmp_path / "incidents.db")
+        conn = idb.get_connection()
+        idb.sync(conn)
+        return idb, conn
+
+    def test_find_prunable_only_returns_old_incidents(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        prunable = idb.find_prunable(90, conn=conn)
+        assert len(prunable) == 1
+        assert prunable[0]["report_file"] == "old.md"
+
+    def test_dry_run_removes_nothing(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        result = idb.prune(90, yes=False, conn=conn)
+        assert result["dry_run"] is True
+        assert result["count"] == 1
+        assert (tmp_path / "old.md").exists()
+        assert idb.compute_stats(conn)["total"] == 2  # nothing removed from the DB either
+
+    def test_yes_actually_removes_file_db_row_and_history_line(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        result = idb.prune(90, yes=True, conn=conn)
+
+        assert result["dry_run"] is False
+        assert result["count"] == 1
+        assert result["report_files_removed"] == 1
+        assert not (tmp_path / "old.md").exists()
+        assert (tmp_path / "recent.md").exists()  # untouched
+
+        stats = idb.compute_stats(conn)
+        assert stats["total"] == 1
+
+        history_records = [json.loads(l) for l in idb.HISTORY_LOG.read_text().splitlines()]
+        assert len(history_records) == 1
+        assert history_records[0]["report_file"] == "recent.md"
+
+    def test_prune_missing_report_file_does_not_raise(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        (tmp_path / "old.md").unlink()  # already gone somehow
+        result = idb.prune(90, yes=True, conn=conn)
+        assert result["report_files_removed"] == 0  # unlink failed silently, count reflects that
+        assert result["count"] == 1
+
+    def test_prune_with_nothing_to_remove(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        result = idb.prune(365, yes=True, conn=conn)
+        assert result["count"] == 0
+        assert result["report_files_removed"] == 0
+        assert idb.compute_stats(conn)["total"] == 2
+
+    def test_cli_prune_dry_run_by_default(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        conn.close()
+        monkeypatch.setattr(sys, "argv", ["incident_db.py", "--prune", "--older-than-days", "90"])
+        idb.main()
+        out = capsys.readouterr().out
+        assert "DRY RUN" in out
+        assert (tmp_path / "old.md").exists()  # --yes not given, nothing removed
+
+    def test_cli_prune_with_yes_actually_removes(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        conn.close()
+        monkeypatch.setattr(
+            sys, "argv", ["incident_db.py", "--prune", "--older-than-days", "90", "--yes"]
+        )
+        idb.main()
+        out = capsys.readouterr().out
+        assert "Removed 1 incident" in out
+        assert not (tmp_path / "old.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1847,6 +2068,197 @@ class TestDashboardCategoryChart:
         if (rowEls[0].style.display !== 'none') throw new Error('non-matching row should be hidden');
         if (rowEls[1].style.display !== '') throw new Error('matching row should stay visible');
         if (searchCountEl.textContent !== '1 / 2 shown') throw new Error('search count not updated: ' + searchCountEl.textContent);
+        console.log('ok');
+        """
+        result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout
+
+
+class TestDashboardCSVDownload:
+
+    def test_download_button_present_when_there_are_incidents(self):
+        records = [{"category": "cpu", "severity": "P2", "timestamp": "t1",
+                    "root_cause": "x", "report_file": "r.md", "auto_remediated": False}]
+        out = render_html(records)
+        assert 'id="download-csv-btn"' in out
+
+    def test_download_button_absent_when_no_incidents(self):
+        out = render_html([])
+        assert 'id="download-csv-btn"' not in out
+
+    def test_csv_export_js_behaves_correctly_under_node(self):
+        import re
+        import shutil
+        import subprocess
+
+        if shutil.which("node") is None:
+            import pytest
+            pytest.skip("node not available in this environment")
+
+        records = [
+            {"timestamp": "t1", "severity": "P0", "category": "service",
+             "root_cause": 'nginx crashed, "bad" config', "auto_remediated": True, "report_file": "r1.md"},
+            {"timestamp": "t2", "severity": "P2", "category": "disk",
+             "root_cause": "disk full", "auto_remediated": False, "report_file": "r2.md"},
+        ]
+        out = render_html(records)
+        match = re.search(r"<script>(.*?)</script>", out, re.S)
+        assert match, "search script not found in rendered HTML"
+        dashboard_script = match.group(1)
+
+        harness = """
+        global.window = global;
+
+        function FakeCell(text) { this.textContent = text; }
+        function FakeRow(cellTexts) {
+          this.style = {};
+          this._cells = cellTexts.map(function (t) { return new FakeCell(t); });
+          this.textContent = cellTexts.join(' ');
+          this.querySelectorAll = function () { return this._cells; };
+        }
+        var rowEls = [
+          new FakeRow(['P0', 't1', 'service', 'nginx crashed, "bad" config', 'yes', 'r1.md']),
+          new FakeRow(['P2', 't2', 'disk', 'disk full', 'no', 'r2.md']),
+        ];
+
+        var inputEl = {
+          value: '', _listeners: {},
+          addEventListener: function (ev, fn) { this._listeners[ev] = fn; },
+          scrollIntoView: function () {},
+        };
+        var noResultsEl = { style: {} };
+        var searchCountEl = { textContent: '' };
+        var downloadListener = null;
+        var downloadBtnEl = {
+          addEventListener: function (ev, fn) { downloadListener = fn; },
+        };
+        var appendedAnchors = [];
+        var bodyEl = {
+          appendChild: function (el) { appendedAnchors.push(el); },
+          removeChild: function () {},
+        };
+
+        global.document = {
+          getElementById: function (id) {
+            if (id === 'incident-search') return inputEl;
+            if (id === 'no-results') return noResultsEl;
+            if (id === 'search-count') return searchCountEl;
+            if (id === 'download-csv-btn') return downloadBtnEl;
+            return null;
+          },
+          querySelectorAll: function () { return rowEls; },
+          createElement: function () { return { click: function () { this._clicked = true; } }; },
+          body: bodyEl,
+        };
+
+        var createdBlobParts = null;
+        global.Blob = function (parts, opts) { createdBlobParts = parts; this.parts = parts; this.opts = opts; };
+        global.URL = {
+          createObjectURL: function () { return 'blob:fake-url'; },
+          revokeObjectURL: function () {},
+        };
+
+        """ + dashboard_script + """
+
+        if (typeof downloadListener !== 'function') throw new Error('download button listener not attached');
+        downloadListener();
+
+        if (appendedAnchors.length !== 1) throw new Error('expected exactly one anchor appended');
+        var a = appendedAnchors[0];
+        if (a.download !== 'hermes-incidents.csv') throw new Error('unexpected filename: ' + a.download);
+        if (!a._clicked) throw new Error('anchor.click() was not called');
+
+        var csvText = createdBlobParts[0];
+        var lines = csvText.split('\\r\\n');
+        if (lines[0] !== 'Severity,Timestamp,Category,Root Cause,Auto-fixed,Report') {
+          throw new Error('unexpected header: ' + lines[0]);
+        }
+        // A field containing a comma and an embedded quote must be quoted,
+        // with the inner quote doubled (RFC 4180).
+        if (lines[1].indexOf('"nginx crashed, ""bad"" config"') === -1) {
+          throw new Error('comma/quote field not escaped correctly: ' + lines[1]);
+        }
+        if (lines.length !== 3) throw new Error('expected 2 data rows, got: ' + (lines.length - 1));
+
+        console.log('ok');
+        """
+        result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        assert "ok" in result.stdout
+
+    def test_csv_export_respects_active_filter(self):
+        import re
+        import shutil
+        import subprocess
+
+        if shutil.which("node") is None:
+            import pytest
+            pytest.skip("node not available in this environment")
+
+        records = [
+            {"timestamp": "t1", "severity": "P0", "category": "service",
+             "root_cause": "a", "auto_remediated": True, "report_file": "r1.md"},
+            {"timestamp": "t2", "severity": "P2", "category": "disk",
+             "root_cause": "b", "auto_remediated": False, "report_file": "r2.md"},
+        ]
+        out = render_html(records)
+        match = re.search(r"<script>(.*?)</script>", out, re.S)
+        dashboard_script = match.group(1)
+
+        harness = """
+        global.window = global;
+        function FakeCell(text) { this.textContent = text; }
+        function FakeRow(cellTexts) {
+          this.style = {};
+          this._cells = cellTexts.map(function (t) { return new FakeCell(t); });
+          this.textContent = cellTexts.join(' ');
+          this.querySelectorAll = function () { return this._cells; };
+        }
+        var rowEls = [
+          new FakeRow(['P0', 't1', 'service', 'a', 'yes', 'r1.md']),
+          new FakeRow(['P2', 't2', 'disk', 'b', 'no', 'r2.md']),
+        ];
+        var inputEl = {
+          value: '', _listeners: {},
+          addEventListener: function (ev, fn) { this._listeners[ev] = fn; },
+          scrollIntoView: function () {},
+        };
+        var noResultsEl = { style: {} };
+        var searchCountEl = { textContent: '' };
+        var downloadListener = null;
+        var downloadBtnEl = { addEventListener: function (ev, fn) { downloadListener = fn; } };
+        var appendedAnchors = [];
+        var bodyEl = { appendChild: function (el) { appendedAnchors.push(el); }, removeChild: function () {} };
+        global.document = {
+          getElementById: function (id) {
+            if (id === 'incident-search') return inputEl;
+            if (id === 'no-results') return noResultsEl;
+            if (id === 'search-count') return searchCountEl;
+            if (id === 'download-csv-btn') return downloadBtnEl;
+            return null;
+          },
+          querySelectorAll: function () { return rowEls; },
+          createElement: function () { return { click: function () {} }; },
+          body: bodyEl,
+        };
+        var createdBlobParts = null;
+        global.Blob = function (parts) { createdBlobParts = parts; };
+        global.URL = { createObjectURL: function () { return 'blob:x'; }, revokeObjectURL: function () {} };
+
+        """ + dashboard_script + """
+
+        // Filter to "disk" only, then export - only that row should appear.
+        inputEl.value = 'disk';
+        inputEl._listeners['input']();
+        downloadListener();
+
+        var csvText = createdBlobParts[0];
+        var lines = csvText.split('\\r\\n');
+        if (lines.length !== 2) throw new Error('expected header + 1 filtered row, got ' + lines.length + ' lines');
+        if (lines[1].indexOf('disk') === -1) throw new Error('filtered row missing from export: ' + lines[1]);
+        if (csvText.indexOf('service') !== -1) throw new Error('hidden row leaked into export');
+
         console.log('ok');
         """
         result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=10)
