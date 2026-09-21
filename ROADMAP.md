@@ -19,19 +19,20 @@ the same thing - see [CONTRIBUTING.md](CONTRIBUTING.md).
   Discord bot answer "have we seen X before?" by querying the SQLite index
   directly, instead of requiring shell access to the host. Needs Slack/Discord
   signature verification designed carefully before it's exposed to the network.
-- **`--prune --archive` instead of only delete** - today `--prune --yes`
-  deletes old report files outright; an `--archive DIR` option that moves
-  them instead (still removing the SQLite/history rows) would suit anyone
-  who wants cold storage rather than permanent deletion.
-- **Prometheus gauges for flapping/quiet-hours state** - `prometheus_exporter.py`
-  exposes cpu/mem/disk/breach today; `hermes_watchdog_flapping` and
-  `hermes_watchdog_in_quiet_hours` gauges would let an existing
-  Grafana/Prometheus stack show the same suppression state the dashboard
-  and reports already do.
-- **Scheduled `--prune` via the systemd installer** - `scripts/install-watchdog.sh`
-  sets up the watchdog unit; a matching optional timer unit for
-  `incident_db.py --prune --yes` would make retention hands-off instead of
-  a manual/cron-it-yourself step.
+- **Teams Adaptive Card support** - the built-in Teams channel sends a
+  classic MessageCard (the incoming-webhook connector format); Microsoft's
+  newer Workflows webhooks expect an Adaptive Card instead. Today that's
+  reachable via `GENERIC_WEBHOOK_URL` + a custom `GENERIC_WEBHOOK_TEMPLATE`,
+  but first-class support would save that setup step.
+- **P0 escalation / re-notify** - if a P0 stays unresolved for N minutes
+  (config value), send a follow-up notification instead of relying on the
+  next poll's own breach to naturally repeat the page - similar in spirit
+  to the quiet-hours "still ongoing" notice, but for any P0, not just ones
+  that started during quiet hours.
+- **Update `docs/assets/grafana-dashboard.json`** - it has CPU/memory/disk
+  gauges and a breach timeline; add panels for the `hermes_watchdog_flapping`
+  and `hermes_watchdog_in_quiet_hours` gauges added in this release so the
+  importable dashboard covers everything `/metrics` now exposes.
 
 ## Explicitly out of scope (for now)
 

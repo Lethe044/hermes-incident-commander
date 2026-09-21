@@ -27,13 +27,22 @@ _latest: dict[str, Any] = {}
 _lock = threading.Lock()
 
 
-def update_latest_metrics(metrics: Any, breaches: dict[str, bool]) -> None:
+def update_latest_metrics(
+    metrics: Any,
+    breaches: dict[str, bool],
+    is_flapping: bool = False,
+    in_quiet_hours: bool = False,
+) -> None:
     """Called by the watchdog after every poll to publish the latest
     snapshot. `metrics` is a monitor.watchdog.Metrics instance (typed as
-    Any here to avoid a circular import)."""
+    Any here to avoid a circular import). `is_flapping`/`in_quiet_hours`
+    reflect the current incident's suppression state, if any - both
+    default to False for a poll with no active incident."""
     with _lock:
         _latest["metrics"] = metrics
         _latest["breaches"] = dict(breaches)
+        _latest["is_flapping"] = is_flapping
+        _latest["in_quiet_hours"] = in_quiet_hours
 
 
 def render_prometheus_text() -> str:
@@ -42,6 +51,8 @@ def render_prometheus_text() -> str:
     with _lock:
         metrics = _latest.get("metrics")
         breaches = dict(_latest.get("breaches", {}))
+        is_flapping = _latest.get("is_flapping", False)
+        in_quiet_hours = _latest.get("in_quiet_hours", False)
 
     if metrics is None:
         return "# Hermes Incident Commander watchdog has not completed a check yet\n"
@@ -64,6 +75,14 @@ def render_prometheus_text() -> str:
     ]
     for key in sorted(breaches):
         lines.append(f'hermes_watchdog_breach{{metric="{key}"}} {1 if breaches[key] else 0}')
+    lines.extend([
+        "# HELP hermes_watchdog_flapping Whether the current incident's category is flapping (1) or not (0)",
+        "# TYPE hermes_watchdog_flapping gauge",
+        f"hermes_watchdog_flapping {1 if is_flapping else 0}",
+        "# HELP hermes_watchdog_in_quiet_hours Whether the watchdog is currently inside a configured quiet-hours window (1) or not (0)",
+        "# TYPE hermes_watchdog_in_quiet_hours gauge",
+        f"hermes_watchdog_in_quiet_hours {1 if in_quiet_hours else 0}",
+    ])
     lines.append("")
     return "\n".join(lines)
 

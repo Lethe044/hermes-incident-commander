@@ -43,6 +43,9 @@ class TestNotifier:
     def test_not_configured_by_default(self, monkeypatch):
         monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
         monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("TEAMS_WEBHOOK_URL", raising=False)
+        monkeypatch.delenv("PAGERDUTY_ROUTING_KEY", raising=False)
+        monkeypatch.delenv("GENERIC_WEBHOOK_URL", raising=False)
         notifier = Notifier()
         assert notifier.configured is False
 
@@ -68,6 +71,66 @@ class TestNotifier:
         assert len(results) == 1
         assert results[0].ok is True
         mock_urlopen.assert_called_once()
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_teams_configured_via_env(self, mock_urlopen, monkeypatch):
+        monkeypatch.setenv("TEAMS_WEBHOOK_URL", "https://outlook.office.com/webhook/abc")
+        notifier = Notifier()
+        assert notifier.configured is True
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_posts_messagecard_to_teams(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(teams_webhook_url="https://outlook.office.com/webhook/abc")
+        results = notifier.send("disk full", title="P1 - disk", severity="P1")
+
+        assert len(results) == 1
+        assert results[0].ok is True
+        sent_request = mock_urlopen.call_args[0][0]
+        payload = json.loads(sent_request.data.decode("utf-8"))
+        assert payload["@type"] == "MessageCard"
+        assert payload["title"] == "P1 - disk"
+        assert payload["text"] == "disk full"
+        assert payload["themeColor"] == "F0883E"  # P1 color
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_teams_color_varies_by_severity(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(teams_webhook_url="https://outlook.office.com/webhook/abc")
+        notifier.send("msg", severity="P0")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["themeColor"] == "D73A49"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_teams_unknown_severity_uses_gray(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(teams_webhook_url="https://outlook.office.com/webhook/abc")
+        notifier.send("msg", severity=None)
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["themeColor"] == "808080"
+
+    @patch("monitor.notifier.urllib.request.urlopen")
+    def test_send_alert_reaches_teams_alongside_other_channels(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        notifier = Notifier(
+            discord_webhook_url="https://discord.com/api/webhooks/1/2",
+            teams_webhook_url="https://outlook.office.com/webhook/abc",
+        )
+        results = notifier.send_alert(severity="P0", title_text="disk", detail="disk full")
+        assert len(results) == 2
+        assert all(r.ok for r in results)
 
     @patch("monitor.notifier.urllib.request.urlopen")
     def test_send_p0_alert_formats_message(self, mock_urlopen):
@@ -1057,6 +1120,29 @@ class TestRunOnceAndPagerDutyResolve:
 
         mock_send_alert.assert_called_once()
 
+    def test_prometheus_gauges_reflect_flapping_and_quiet_hours_state(self, tmp_path, monkeypatch):
+        from monitor import prometheus_exporter as pe
+        wd = self._patch_incident_paths(monkeypatch, tmp_path)
+        breached = Metrics(
+            timestamp="2026-01-01T03:00:00+00:00",  # inside the quiet window
+            cpu_percent=99.0, mem_percent=10, disk_percent=10, failed_services=[],
+        )
+        notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
+        cfg = WatchdogConfig(quiet_hours=[{"start": "02:00", "end": "04:00"}])
+
+        with patch.object(wd, "collect_metrics", return_value=breached), \
+             patch.object(wd, "triage_with_claude", return_value=self.FAKE_DIAGNOSIS), \
+             patch("monitor.flapping.record_and_check") as mock_record_and_check:
+            mock_record_and_check.return_value = {
+                "category": "cpu", "count": 4, "window_minutes": 60,
+                "flap_threshold": 3, "is_flapping": True,
+            }
+            wd.run_once(cfg, notifier, quiet=True)
+
+        text = pe.render_prometheus_text()
+        assert "hermes_watchdog_flapping 1" in text
+        assert "hermes_watchdog_in_quiet_hours 1" in text
+
     def test_still_ongoing_notification_sent_once_quiet_hours_end(self, tmp_path, monkeypatch):
         wd = self._patch_incident_paths(monkeypatch, tmp_path)
         notifier = Notifier(pagerduty_routing_key="R0UTING-KEY")
@@ -1137,6 +1223,25 @@ class TestPrometheusExporter:
         assert "hermes_watchdog_failed_services_count 1" in text
         assert 'hermes_watchdog_breach{metric="cpu"} 1' in text
         assert 'hermes_watchdog_breach{metric="mem"} 0' in text
+
+    def test_flapping_and_quiet_hours_gauges_default_to_zero(self):
+        from monitor import prometheus_exporter as pe
+        metrics = Metrics(timestamp="t", cpu_percent=10.0, mem_percent=10.0, disk_percent=10.0, failed_services=[])
+        pe.update_latest_metrics(metrics, {"cpu": False, "mem": False, "disk": False, "service": False})
+        text = pe.render_prometheus_text()
+        assert "hermes_watchdog_flapping 0" in text
+        assert "hermes_watchdog_in_quiet_hours 0" in text
+
+    def test_flapping_and_quiet_hours_gauges_reflect_state(self):
+        from monitor import prometheus_exporter as pe
+        metrics = Metrics(timestamp="t", cpu_percent=95.0, mem_percent=10.0, disk_percent=10.0, failed_services=[])
+        pe.update_latest_metrics(
+            metrics, {"cpu": True, "mem": False, "disk": False, "service": False},
+            is_flapping=True, in_quiet_hours=True,
+        )
+        text = pe.render_prometheus_text()
+        assert "hermes_watchdog_flapping 1" in text
+        assert "hermes_watchdog_in_quiet_hours 1" in text
 
     def test_server_serves_metrics_over_real_http(self):
         import urllib.request
@@ -1598,6 +1703,55 @@ class TestIncidentDBPrune:
         out = capsys.readouterr().out
         assert "Removed 1 incident" in out
         assert not (tmp_path / "old.md").exists()
+
+    def test_archive_moves_file_instead_of_deleting(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        archive_dir = tmp_path / "archive"
+        result = idb.prune(90, yes=True, archive_dir=archive_dir, conn=conn)
+
+        assert result["archived"] is True
+        assert result["report_files_archived"] == 1
+        assert result["report_files_removed"] == 0
+        assert not (tmp_path / "old.md").exists()
+        assert (archive_dir / "old.md").exists()
+        assert (archive_dir / "old.md").read_text() == "# old incident\n"
+        assert (tmp_path / "recent.md").exists()  # untouched
+
+    def test_archive_removes_index_rows_same_as_delete(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        archive_dir = tmp_path / "archive"
+        idb.prune(90, yes=True, archive_dir=archive_dir, conn=conn)
+        assert idb.compute_stats(conn)["total"] == 1  # only "recent" remains in the index
+
+    def test_archive_dir_created_if_missing(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        archive_dir = tmp_path / "nested" / "archive" / "dir"
+        assert not archive_dir.exists()
+        idb.prune(90, yes=True, archive_dir=archive_dir, conn=conn)
+        assert archive_dir.is_dir()
+        assert (archive_dir / "old.md").exists()
+
+    def test_dry_run_with_archive_does_not_move_anything(self, tmp_path, monkeypatch):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        archive_dir = tmp_path / "archive"
+        result = idb.prune(90, yes=False, archive_dir=archive_dir, conn=conn)
+        assert result["dry_run"] is True
+        assert result["archived"] is True  # reflects the *would-be* mode
+        assert not archive_dir.exists()
+        assert (tmp_path / "old.md").exists()
+
+    def test_cli_prune_archive_flag(self, tmp_path, monkeypatch, capsys):
+        idb, conn = self._seeded_db_with_real_report_files(tmp_path, monkeypatch)
+        conn.close()
+        archive_dir = tmp_path / "archive"
+        monkeypatch.setattr(
+            sys, "argv",
+            ["incident_db.py", "--prune", "--older-than-days", "90", "--yes", "--archive", str(archive_dir)],
+        )
+        idb.main()
+        out = capsys.readouterr().out
+        assert "moved to" in out
+        assert (archive_dir / "old.md").exists()
 
 
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ Usage:
     python -m monitor.incident_db --stats --format csv > stats.csv
     python -m monitor.incident_db --prune --older-than-days 90           # dry run
     python -m monitor.incident_db --prune --older-than-days 90 --yes     # actually remove
+    python -m monitor.incident_db --prune --older-than-days 90 --archive /backup/incidents --yes
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import argparse
 import csv
 import io
 import json
+import shutil
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -425,7 +427,10 @@ def find_prunable(older_than_days: int, conn: sqlite3.Connection | None = None) 
 
 
 def prune(
-    older_than_days: int, yes: bool = False, conn: sqlite3.Connection | None = None
+    older_than_days: int,
+    yes: bool = False,
+    archive_dir: str | Path | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> dict[str, Any]:
     """Removes incidents older than `older_than_days`: their report .md
     file under INCIDENT_DIR (if it still exists), their row in the SQLite
@@ -433,8 +438,14 @@ def prune(
     either way, the returned dict says what would be/was removed, so a
     dry run can be reviewed before committing to `--yes`.
 
+    If `archive_dir` is given, report files are moved there instead of
+    deleted (the SQLite row and history.jsonl line are still removed
+    either way - the index only ever tracks the active retention window;
+    the archived file is the durable copy). `archive_dir` is created if
+    needed.
+
     Keeps to the same safety standard as everything else here: this only
-    ever deletes informational report files and its own index/history
+    ever deletes/moves informational report files and its own index/history
     rows - it never touches a watched service or anything on the
     remediation allow-list."""
     own_conn = conn is None
@@ -446,6 +457,7 @@ def prune(
         "count": len(to_remove),
         "report_files": [r["report_file"] for r in to_remove if r["report_file"]],
         "dry_run": not yes,
+        "archived": archive_dir is not None,
     }
 
     if not yes:
@@ -453,18 +465,29 @@ def prune(
             conn.close()
         return result
 
+    archive_path = Path(archive_dir) if archive_dir is not None else None
+    if archive_path is not None:
+        archive_path.mkdir(parents=True, exist_ok=True)
+
     removed_files = 0
+    archived_files = 0
     for r in to_remove:
         if not r["report_file"]:
             continue
+        src = INCIDENT_DIR / r["report_file"]
         try:
-            (INCIDENT_DIR / r["report_file"]).unlink()
-            removed_files += 1
+            if archive_path is not None:
+                shutil.move(str(src), str(archive_path / src.name))
+                archived_files += 1
+            else:
+                src.unlink()
+                removed_files += 1
         except FileNotFoundError:
             pass
         except OSError:
             pass
     result["report_files_removed"] = removed_files
+    result["report_files_archived"] = archived_files
 
     remove_timestamps = {r["timestamp"] for r in to_remove}
     if remove_timestamps:
@@ -523,6 +546,11 @@ def main() -> None:
         help="Actually perform the --prune deletion (otherwise it's a dry run that only prints "
              "what would be removed)",
     )
+    parser.add_argument(
+        "--archive", metavar="DIR",
+        help="With --prune --yes, move report files to DIR instead of deleting them "
+             "(the SQLite/history rows are removed either way)",
+    )
     args = parser.parse_args()
 
     if not args.sync and not args.search and not args.stats and not args.prune:
@@ -545,12 +573,19 @@ def main() -> None:
             print(format_stats(compute_stats(conn), fmt=args.format))
 
         if args.prune:
-            result = prune(args.older_than_days, yes=args.yes, conn=conn)
+            result = prune(args.older_than_days, yes=args.yes, archive_dir=args.archive, conn=conn)
             if result["dry_run"]:
+                action = f"archive to {args.archive}" if args.archive else "remove"
                 print(
-                    f"[DRY RUN] Would remove {result['count']} incident(s) older than "
+                    f"[DRY RUN] Would {action} {result['count']} incident(s) older than "
                     f"{args.older_than_days} days ({len(result['report_files'])} report "
-                    f"file(s)). Re-run with --yes to actually remove them."
+                    f"file(s)). Re-run with --yes to actually do it."
+                )
+            elif result["archived"]:
+                print(
+                    f"Removed {result['count']} incident(s) older than {args.older_than_days} "
+                    f"days from the index ({result['report_files_archived']} report file(s) "
+                    f"moved to {args.archive})."
                 )
             else:
                 print(

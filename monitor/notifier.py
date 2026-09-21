@@ -1,19 +1,27 @@
 """
 Hermes Incident Commander - Notifier
 =====================================
-Zero-dependency Discord / Slack / PagerDuty notifications. Uses only the
-Python standard library (urllib) so it never adds a new pip dependency.
+Zero-dependency Discord / Slack / Microsoft Teams / PagerDuty
+notifications. Uses only the Python standard library (urllib) so it never
+adds a new pip dependency.
 
 Configure via environment variables (recommended - never commit webhook
 URLs or routing keys to source control):
 
     export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
     export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+    export TEAMS_WEBHOOK_URL="https://outlook.office.com/webhook/..."
     export PAGERDUTY_ROUTING_KEY="..."   # PagerDuty Events API v2 integration key
     export GENERIC_WEBHOOK_URL="..."     # any endpoint that accepts a JSON POST
 
+Teams sends a MessageCard (the classic incoming-webhook connector format),
+colored by severity (red/orange/yellow/blue for P0-P3). If your Teams
+channel only has the newer Workflows webhook (which expects Adaptive Cards,
+not MessageCard), use GENERIC_WEBHOOK_URL with a GENERIC_WEBHOOK_TEMPLATE
+shaped for it instead - see below.
+
 The generic webhook is for anything without first-class support here
-(Opsgenie, a custom internal tool, Microsoft Teams via a relay, etc.) -
+(Opsgenie, a custom internal tool, etc.) -
 by default it POSTs a small, stable JSON body ({"source", "title",
 "message", "severity"} - "severity" omitted when not applicable) rather
 than trying to match any one platform's expected schema. If a target
@@ -56,6 +64,16 @@ PAGERDUTY_SEVERITY_MAP = {
     "P3": "info",
 }
 
+# themeColor for a Teams MessageCard, by severity - red/orange/yellow/blue,
+# matching the color coding already used elsewhere (e.g. the dashboard's
+# severity bar chart).
+_TEAMS_COLOR_BY_SEVERITY = {
+    "P0": "D73A49",
+    "P1": "F0883E",
+    "P2": "D4A72C",
+    "P3": "58A6FF",
+}
+
 
 @dataclass
 class NotifyResult:
@@ -74,6 +92,7 @@ class Notifier:
         self,
         discord_webhook_url: str | None = None,
         slack_webhook_url: str | None = None,
+        teams_webhook_url: str | None = None,
         pagerduty_routing_key: str | None = None,
         generic_webhook_url: str | None = None,
         generic_webhook_template: str | None = None,
@@ -83,6 +102,7 @@ class Notifier:
     ):
         self.discord_webhook_url = discord_webhook_url or os.environ.get("DISCORD_WEBHOOK_URL")
         self.slack_webhook_url = slack_webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
+        self.teams_webhook_url = teams_webhook_url or os.environ.get("TEAMS_WEBHOOK_URL")
         self.pagerduty_routing_key = pagerduty_routing_key or os.environ.get("PAGERDUTY_ROUTING_KEY")
         self.generic_webhook_url = generic_webhook_url or os.environ.get("GENERIC_WEBHOOK_URL")
         self.generic_webhook_template = generic_webhook_template or os.environ.get(
@@ -98,7 +118,7 @@ class Notifier:
     @property
     def configured(self) -> bool:
         return bool(
-            self.discord_webhook_url or self.slack_webhook_url
+            self.discord_webhook_url or self.slack_webhook_url or self.teams_webhook_url
             or self.pagerduty_routing_key or self.generic_webhook_url
         )
 
@@ -156,6 +176,17 @@ class Notifier:
         if self.slack_webhook_url:
             text = f"*{title}*\n{message}" if title else message
             results.append(self._post_json(self.slack_webhook_url, {"text": text[:3800]}))
+
+        if self.teams_webhook_url:
+            color = _TEAMS_COLOR_BY_SEVERITY.get(severity or "", "808080")
+            results.append(self._post_json(self.teams_webhook_url, {
+                "@type": "MessageCard",
+                "@context": "http://schema.org/extensions",
+                "summary": title or "Hermes Incident Commander",
+                "themeColor": color,
+                "title": title or "Hermes Incident Commander",
+                "text": message,
+            }))
 
         if self.generic_webhook_url:
             payload = self._render_generic_webhook_payload(title, message, severity)
@@ -302,7 +333,7 @@ def test_notify() -> None:
     if not notifier.configured:
         print(
             "No channels configured. Set DISCORD_WEBHOOK_URL, SLACK_WEBHOOK_URL, "
-            "PAGERDUTY_ROUTING_KEY, and/or GENERIC_WEBHOOK_URL."
+            "TEAMS_WEBHOOK_URL, PAGERDUTY_ROUTING_KEY, and/or GENERIC_WEBHOOK_URL."
         )
         return
     results = notifier.send(

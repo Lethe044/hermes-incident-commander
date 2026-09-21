@@ -3,7 +3,46 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [2.7.0] - Unreleased
+## [2.8.0] - Unreleased
+
+### Added
+- **Microsoft Teams notification channel** - `TEAMS_WEBHOOK_URL` (or
+  `Notifier(teams_webhook_url=...)`) posts a MessageCard (the classic
+  incoming-webhook connector format), colored by severity
+  (red/orange/yellow/blue for P0-P3, gray for unset), alongside the
+  existing Discord/Slack/PagerDuty/generic-webhook channels.
+- **Flapping/quiet-hours Prometheus gauges** - `hermes_watchdog_flapping`
+  and `hermes_watchdog_in_quiet_hours` on `/metrics`
+  (`prometheus_exporter.py`), reflecting the current incident's
+  suppression state, so an existing Grafana/Prometheus stack can show the
+  same thing the dashboard and reports already do.
+- **`--prune --archive DIR`** - `incident_db.py --prune --yes --archive DIR`
+  moves old report files to `DIR` instead of deleting them outright (the
+  SQLite/history rows are still removed from the active index either way -
+  the archived file becomes the durable copy). `DIR` is created if needed.
+- **Scheduled `--prune` via the systemd installer** - `install-watchdog.sh
+  --with-prune-timer` (optionally with `--prune-older-than-days N`, default
+  90) additionally installs a daily systemd timer that runs
+  `incident_db.py --prune --yes`, so retention doesn't need a manual or
+  cron-it-yourself step. `--uninstall --yes` removes the timer too if
+  present.
+
+### Fixed
+- `install-watchdog.sh`'s EnvironmentFile writer only ever captured
+  `DISCORD_WEBHOOK_URL`/`SLACK_WEBHOOK_URL`/`PAGERDUTY_ROUTING_KEY` from the
+  shell - `TEAMS_WEBHOOK_URL`, `GENERIC_WEBHOOK_URL`, and
+  `GENERIC_WEBHOOK_TEMPLATE` (added in 2.6.0/2.7.0) were silently dropped
+  and never reached the installed systemd service. Now captures all of
+  them.
+
+- 13 new tests: `TestIncidentDBPrune` archive tests (5), Prometheus
+  flapping/quiet-hours gauge tests (3), and Microsoft Teams tests in
+  `TestNotifier` (5). 220 tests total across the suite. `install-watchdog.sh`
+  was also verified by hand end-to-end (dry run, a real install/uninstall
+  against a scratch systemd/env directory with a stub `systemctl`, and
+  `--help`) since it's bash and outside the pytest suite.
+
+## [2.7.0] - Released
 
 ### Added
 - **`incident_db.py --prune`** - `find_prunable()`/`prune()`: removes

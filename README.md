@@ -16,6 +16,20 @@ no Hermes installation required.
 
 ## What's New
 
+- 💬 **Microsoft Teams notification channel** - `TEAMS_WEBHOOK_URL` posts a
+  MessageCard, colored by severity, alongside Discord/Slack/PagerDuty/the
+  generic webhook.
+- 📊 **Flapping/quiet-hours Prometheus gauges** - `hermes_watchdog_flapping`
+  and `hermes_watchdog_in_quiet_hours` on `/metrics`, so an existing
+  Grafana/Prometheus stack can show the same suppression state the
+  dashboard and reports already do.
+- ⏰ **Scheduled `--prune` via the systemd installer** - `install-watchdog.sh
+  --with-prune-timer` sets up a daily systemd timer that runs
+  `incident_db.py --prune --yes`, so retention doesn't need a manual or
+  cron-it-yourself step.
+- 🗄️ **`--prune --archive DIR`** - move old report files to cold storage
+  instead of deleting them outright (the SQLite/history rows are removed
+  from the active index either way).
 - 🧹 **`incident_db.py --prune`** - removes incidents older than
   `--older-than-days` (report file, SQLite row, and `history.jsonl` line),
   dry-run by default, `--yes` to actually delete - keeps disk usage bounded
@@ -174,9 +188,10 @@ and needs nothing but `ANTHROPIC_API_KEY`:
 pip install -e .              # or: pip install -r requirements.txt psutil
 
 export ANTHROPIC_API_KEY=sk-ant-...
-# optional, for real-time alerts (any subset - all four can be set at once):
+# optional, for real-time alerts (any subset - all can be set at once):
 export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+export TEAMS_WEBHOOK_URL=https://outlook.office.com/webhook/...
 export PAGERDUTY_ROUTING_KEY=...
 export GENERIC_WEBHOOK_URL=...        # any endpoint that accepts a JSON POST
 export GENERIC_WEBHOOK_TEMPLATE='{"text": {message}}'   # optional - match a specific target's schema
@@ -207,6 +222,7 @@ python -m monitor.incident_db --search "nginx" --format json     # or --format c
 python -m monitor.incident_db --stats                            # or --format json/csv
 python -m monitor.incident_db --prune --older-than-days 90       # dry run
 python -m monitor.incident_db --prune --older-than-days 90 --yes # actually remove
+python -m monitor.incident_db --prune --older-than-days 90 --archive /backup/incidents --yes
 
 # Check a config file for typos/invalid allow-list entries before using it
 python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-config
@@ -214,6 +230,7 @@ python -m monitor.watchdog --config monitor/watchdog_config.yaml --validate-conf
 # One-command systemd install (dry-run by default - see exactly what it would do)
 ./scripts/install-watchdog.sh
 sudo ./scripts/install-watchdog.sh --yes --auto-remediate --adaptive-thresholds
+sudo ./scripts/install-watchdog.sh --yes --with-prune-timer --prune-older-than-days 90
 ```
 
 Unlike the demo/training environment, the watchdog **never gives the model
@@ -233,14 +250,15 @@ slowly train the watchdog into ignoring itself. It's off by default; nothing
 changes unless you opt in.
 
 `monitor/notifier.py` fans an alert out to every channel you've configured -
-Discord, Slack, and/or PagerDuty (via the Events API v2) - so it's safe to
-set all three; nothing extra fires for channels you leave unconfigured. When
-PagerDuty is configured, the watchdog also tracks which breach types have an
-open incident and calls PagerDuty's resolve endpoint automatically once
-things recover, instead of leaving pages open forever. Delivery to any
-channel now retries transient failures (timeouts, connection drops, HTTP
-429/5xx) with exponential backoff, so a brief network blip during a real
-incident doesn't mean the page silently never arrives.
+Discord, Slack, Microsoft Teams, a generic webhook, and/or PagerDuty (via
+the Events API v2) - so it's safe to set all of them; nothing extra fires
+for channels you leave unconfigured. When PagerDuty is configured, the
+watchdog also tracks which breach types have an open incident and calls
+PagerDuty's resolve endpoint automatically once things recover, instead of
+leaving pages open forever. Delivery to any channel now retries transient
+failures (timeouts, connection drops, HTTP 429/5xx) with exponential
+backoff, so a brief network blip during a real incident doesn't mean the
+page silently never arrives.
 
 If the same category of incident fires 3+ times within an hour,
 `monitor/flapping.py` flags it - a "⚠️ FLAPPING DETECTED" banner at the top
@@ -300,8 +318,12 @@ config and exits, without starting the watchdog.
 Want it running on boot without setting up the systemd unit by hand?
 [`scripts/install-watchdog.sh`](scripts/install-watchdog.sh) does that in
 one command - dry-run by default, and it writes your API key/secrets to a
-root-only file rather than into the unit file itself. `--uninstall --yes`
-removes it again.
+root-only file rather than into the unit file itself. Add
+`--with-prune-timer` to also install a daily systemd timer that runs
+`incident_db.py --prune --yes` (`--prune-older-than-days` to change the
+threshold, default 90), so retention doesn't need a manual/cron-it-yourself
+step. `--uninstall --yes` removes everything this installed, watchdog
+service and prune timer alike.
 
 Once you have some incident history, generate a dashboard:
 
@@ -327,10 +349,12 @@ If you already run Prometheus and Grafana, you can scrape the watchdog
 directly instead of (or alongside) the dashboard - `--metrics-port` starts a
 tiny, dependency-free `/metrics` endpoint (`monitor/prometheus_exporter.py`)
 exposing `hermes_watchdog_cpu_percent`, `hermes_watchdog_mem_percent`,
-`hermes_watchdog_disk_percent`, `hermes_watchdog_failed_services_count`, and
-a `hermes_watchdog_breach{metric="..."}` gauge per tracked metric. It binds
-to `127.0.0.1` by default and is read-only - it cannot be used to control
-the watchdog. Import [`docs/assets/grafana-dashboard.json`](docs/assets/grafana-dashboard.json)
+`hermes_watchdog_disk_percent`, `hermes_watchdog_failed_services_count`,
+a `hermes_watchdog_breach{metric="..."}` gauge per tracked metric, and
+`hermes_watchdog_flapping`/`hermes_watchdog_in_quiet_hours` reflecting the
+current incident's suppression state. It binds to `127.0.0.1` by default
+and is read-only - it cannot be used to control the watchdog. Import
+[`docs/assets/grafana-dashboard.json`](docs/assets/grafana-dashboard.json)
 into Grafana to get CPU/memory/disk gauges and a breach timeline without
 building panels by hand.
 
@@ -424,7 +448,7 @@ graph LR
 
     SCRIPTS --> INSTALL["🔧 install-watchdog.sh<br/>← one-command systemd install, dry-run by default"]
 
-    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 207 pytest cases"]
+    TESTS --> TEST_PY["🐍 test_incident_env.py + test_monitor.py<br/>← 220 pytest cases"]
 
     DOCS --> SETUP["📄 SETUP.md"]
     DOCS --> WRITEUP["📄 WRITEUP.md"]
@@ -544,14 +568,14 @@ pip install pytest pytest-asyncio psutil
 # Fast sanity check, no dependencies beyond the stdlib + pyyaml
 python environments/incident_env.py --smoke-test
 
-# Run full test suite (207 tests: scenarios, reward function, skill file,
-# demo script, notifier incl. PagerDuty + retry/backoff + generic webhook
-# w/ custom templates, watchdog dry-run/resolve wiring/--validate-config/
-# notification throttling/quiet hours + still-ongoing notice, Prometheus
-# exporter, incident search + stats + prune (SQLite/FTS + CSV/JSON
-# export), adaptive baseline, flapping detection + threshold suggestion,
-# dashboard incl. search box + trend + clickable category charts + CSV
-# download)
+# Run full test suite (220 tests: scenarios, reward function, skill file,
+# demo script, notifier incl. Teams/PagerDuty + retry/backoff + generic
+# webhook w/ custom templates, watchdog dry-run/resolve wiring/
+# --validate-config/notification throttling/quiet hours + still-ongoing
+# notice, Prometheus exporter incl. flapping/quiet-hours gauges, incident
+# search + stats + prune/archive (SQLite/FTS + CSV/JSON export), adaptive
+# baseline, flapping detection + threshold suggestion, dashboard incl.
+# search box + trend + clickable category charts + CSV download)
 pytest tests/ -v
 
 # Run specific test classes
@@ -578,7 +602,7 @@ CI runs both of the above automatically on every push and PR across Python
 
 5. **Works standalone, today, on a real host.** `monitor/watchdog.py` doesn't need Hermes at all - just `ANTHROPIC_API_KEY` - and is built with an explicit, documented safety model instead of giving an LLM raw shell access to your production box.
 
-6. **Ships with working code and CI.** The demo runs standalone, 207 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
+6. **Ships with working code and CI.** The demo runs standalone, 220 tests pass, GitHub Actions verifies every push, and the skill file installs in one command.
 
 ---
 

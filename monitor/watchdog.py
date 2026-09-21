@@ -796,6 +796,7 @@ def run_once(cfg: WatchdogConfig, notifier: Notifier, quiet: bool = False, dry_r
     # record every occurrence regardless.
     category = diagnosis.get("category", "unknown")
     is_currently_quiet = in_quiet_hours(metrics.timestamp, cfg.quiet_hours)
+    update_latest_metrics(metrics, breaches, is_flapping=flap_info["is_flapping"], in_quiet_hours=is_currently_quiet)
 
     suppress_reason: str | None = None
     if flap_info["is_flapping"] and flap_info["count"] > flap_info["flap_threshold"]:
